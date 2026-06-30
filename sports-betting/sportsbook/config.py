@@ -15,7 +15,9 @@ ROOT = Path(__file__).resolve().parent.parent
 def _load_env_file():
     """Load KEY=VALUE lines from a gitignored .env in the project root, so
     the API key survives shell sessions and stays out of crontabs and git.
-    Real environment variables always win."""
+    Real environment variables always win. Only the app's own keys are
+    accepted — a .env must not be able to set process-wide variables like
+    HTTP_PROXY or SSL_CERT_FILE that the HTTP stack honors."""
     env_path = ROOT / ".env"
     if not env_path.exists():
         return
@@ -24,7 +26,9 @@ def _load_env_file():
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
-        os.environ.setdefault(key.strip(), value.strip().strip("'\""))
+        key = key.strip()
+        if key == "ODDS_API_KEY" or key.startswith("SPORTSBOOK_"):
+            os.environ.setdefault(key, value.strip().strip("'\""))
 
 
 _load_env_file()
