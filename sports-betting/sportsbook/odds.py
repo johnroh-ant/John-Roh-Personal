@@ -24,7 +24,14 @@ def _get(path, **params):
             "ODDS_API_KEY is not set. Get a free key at https://the-odds-api.com "
             "and export ODDS_API_KEY=... before running.")
     params["apiKey"] = config.ODDS_API_KEY
-    resp = requests.get(f"{config.ODDS_API_BASE}{path}", params=params, timeout=30)
+    try:
+        resp = requests.get(f"{config.ODDS_API_BASE}{path}", params=params,
+                            timeout=30)
+    except requests.RequestException as exc:
+        # requests embeds the full URL — apiKey query param included — in
+        # its exception text; never let that reach logs
+        raise OddsAPIError(
+            f"Odds API {path} network error: {type(exc).__name__}") from None
     if resp.status_code != 200:
         raise OddsAPIError(
             f"Odds API {path} -> {resp.status_code}: {resp.text[:300]}",

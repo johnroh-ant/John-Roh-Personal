@@ -82,6 +82,20 @@ class TestMath(unittest.TestCase):
         self.assertLess(win, 0.5)
 
 
+class TestOddsClient(unittest.TestCase):
+    def test_network_errors_never_leak_the_api_key(self):
+        from sportsbook import odds
+        import requests as _requests
+        secret = "sekrit-key-12345"
+        err = _requests.ConnectionError(
+            f"HTTPSConnectionPool: /v4/sports?apiKey={secret} refused")
+        with mock.patch.object(odds.config, "ODDS_API_KEY", secret), \
+             mock.patch("sportsbook.odds.requests.get", side_effect=err):
+            with self.assertRaises(odds.OddsAPIError) as ctx:
+                odds._get("/sports/baseball_mlb/odds")
+            self.assertNotIn(secret, str(ctx.exception))
+
+
 class DBTestCase(unittest.TestCase):
     """Base: fresh temp database per test."""
 
