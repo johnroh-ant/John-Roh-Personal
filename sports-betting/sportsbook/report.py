@@ -90,8 +90,12 @@ def write_report(conn, run_date, analyses, card, settled_bets):
                   "|---|---|---|---|---|---|---|---|---|"]
         for i, b in enumerate(card, 1):
             desc = bet_desc(b)
-            fd = (f"{fmt_spread(b.get('line'))} {fmt_price(b['price'])}"
-                  if b["market"] != "moneyline" else fmt_price(b["price"]))
+            if b["market"] == "moneyline":
+                fd = fmt_price(b["price"])
+            elif b["market"] == "total":
+                fd = f"{b['line']:g} {fmt_price(b['price'])}"
+            else:
+                fd = f"{fmt_spread(b['line'])} {fmt_price(b['price'])}"
             ours = (f"{b['model_line']:+g}" if b["market"] != "total"
                     else f"{b['model_line']:g}")
             lines.append(
