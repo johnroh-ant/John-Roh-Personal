@@ -9,9 +9,9 @@
   python bet.py status           bankroll, record by sport, pending bets
   python bet.py weights          current learned model parameters
 
-Daily usage is a single cron line (noon Pacific):
+Daily usage is a single cron line (9:30 AM Pacific):
   CRON_TZ=America/Los_Angeles
-  0 12 * * *  cd ~/John-Roh-Personal/sports-betting && python3 bet.py run
+  30 9 * * *  cd ~/John-Roh-Personal/sports-betting && python3 bet.py run
 """
 
 import sys
