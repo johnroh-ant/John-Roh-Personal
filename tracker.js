@@ -36,7 +36,7 @@
       work: { stopId: '6467dbd6a59bbb100741d819', label: 'Berry at Mission Creek', match: /berry\s*at\s*mission\s*creek/i }
     },
     offRouteMeters: 150,     // farther than this from the polyline = off-route
-    staleMs: 150000,         // position pings older than this are flagged stale
+    staleMs: 120000,         // position pings older than this are flagged stale
     deadMs: 600000,          // and older than this are dropped entirely
     fallbackSpeedMps: 5.5,   // assumed speed where the schedule gives no duration
     maxSpeedMps: 18,         // cap on plausible bus speed for projection continuity
@@ -423,24 +423,33 @@
   /*
    * Schedule-adherence prediction for one bus.
    *
-   * Matches the bus to the timetable trip whose schedule best agrees with
-   * the bus's position right now, measures the bus's delay against it, and
-   * applies that delay to the published time at the target stop. Falls back
-   * to integrating leg durations when no trip matches.
+   * All schedule reasoning (trip matching, delay, staged departures, the
+   * passed-the-stop decision) is evaluated AS OF THE BUS'S LAST GPS FIX
+   * (fixSecOfDay), not wall-clock time: when the GPS goes quiet, elapsed
+   * time must not count against the bus — otherwise a silent bus "drifts"
+   * onto a later trip and the app claims it already left when the only
+   * evidence says it was still approaching. Only arrival floors use real
+   * now (an arrival can't be in the past). A bus is declared past the stop
+   * solely from its position at fix time.
    *
    * Returns { arrivalSec (seconds-of-day), delaySec, method, tripStartMin }
    * or null when no more service reaches the stop today.
    */
-  function predictBus(model, trips, fix, bus, targetIdx, nowSecOfDay) {
+  function predictBus(model, trips, fix, bus, targetIdx, nowSecOfDay, fixSecOfDay) {
     var L = model.path.length;
+    // fixSecOfDay is required — a silent wall-clock fallback would reintroduce
+    // the "quiet bus drifts onto a later trip" bug for any future caller.
+    // mod-wrap: a fix taken just before midnight viewed just after stays on
+    // the previous evening instead of becoming second 0 of the new day.
+    var busSec = mod(fixSecOfDay, 86400);
     var best = null;
     (trips || []).forEach(function (trip) {
       var winLo = trip.startMin * 60 - CONFIG.tripMatch.windowBeforeSec;
       var winHi = trip.endMin * 60 + CONFIG.tripMatch.windowAfterSec;
-      if (nowSecOfDay < winLo || nowSecOfDay > winHi) return;
+      if (busSec < winLo || busSec > winHi) return;
       var tau = tripTau(trip, model, fix.routeDist);
       if (!tau) return;
-      var delay = nowSecOfDay - tau.tauSec;
+      var delay = busSec - tau.tauSec;
       if (!best || Math.abs(delay) < Math.abs(best.delay)) {
         best = { trip: trip, tau: tau, delay: delay };
       }
@@ -453,7 +462,7 @@
     // not be hijacked onto a much later trip anchored there.
     var trusted = best && Math.abs(best.delay) <= CONFIG.tripMatch.maxDelaySec;
     if (!trusted || best.tau.entryIdx === 0) {
-      var staged = stagedDeparture(model, trips, fix, bus, nowSecOfDay);
+      var staged = stagedDeparture(model, trips, fix, bus, busSec);
       if (staged) {
         for (var s = 0; s < staged.trip.entries.length; s++) {
           if (sameStop(model, staged.trip.entries[s].idx, targetIdx)) {
@@ -487,11 +496,12 @@
       }
       // The drawn polyline simplifies some blocks, so a bus still approaching
       // the stop can project just past it. Hold the arrival while the
-      // projection is within the grace zone and the schedule agrees.
+      // projection is within the grace zone and the schedule agreed at fix
+      // time.
       if (tEntry) {
         var pastBy = mod(fix.routeDist - tEntry.routeDist, L);
         var passSec = tEntry.min * 60 + delay;
-        if (pastBy < CONFIG.passedStopGraceMeters && Math.abs(nowSecOfDay - passSec) < CONFIG.passedStopGraceSec) {
+        if (pastBy < CONFIG.passedStopGraceMeters && Math.abs(busSec - passSec) < CONFIG.passedStopGraceSec) {
           return {
             arrivalSec: Math.max(nowSecOfDay, passSec),
             delaySec: delay,
@@ -500,11 +510,13 @@
           };
         }
       }
-      // Bus genuinely passed the stop on this loop: its next visit is the
-      // first published time it can physically reach by driving around
-      // (published times in between are other vehicles' trips).
+      // Bus genuinely passed the stop on this loop (per its fix-time
+      // position): its next visit is the first published time it can
+      // physically reach by driving around (published times in between are
+      // other vehicles' trips).
       var travelSec = etaSeconds(model, fix.routeDist, targetIdx);
-      var next = firstPublishedArrival(model, trips, targetIdx, nowSecOfDay + CONFIG.reachabilityFactor * travelSec);
+      var next = firstPublishedArrival(model, trips, targetIdx,
+        Math.max(nowSecOfDay + 1, busSec + CONFIG.reachabilityFactor * travelSec));
       if (next) return { arrivalSec: next.arrivalSec, delaySec: null, method: 'next-trip', tripStartMin: next.tripStartMin };
       return null; // no more service to that stop today
     }
@@ -515,7 +527,7 @@
       // is more trustworthy than any trip match.
       var holding = bus.speed < CONFIG.parkedSpeedMps && nearTripStart(model, trips, fix.routeDist);
       if (best && !holding) {
-        return { arrivalSec: nowSecOfDay + etaSeconds(model, fix.routeDist, targetIdx), delaySec: null, method: 'legs', tripStartMin: null };
+        return { arrivalSec: busSec + etaSeconds(model, fix.routeDist, targetIdx), delaySec: null, method: 'legs', tripStartMin: null };
       }
       // Between service periods (or holding for one): the next published
       // trip is the real answer.
@@ -525,9 +537,9 @@
     }
 
     // Timetable unavailable: integrate scheduled leg durations from the
-    // live position.
+    // last known position.
     return {
-      arrivalSec: nowSecOfDay + etaSeconds(model, fix.routeDist, targetIdx),
+      arrivalSec: busSec + etaSeconds(model, fix.routeDist, targetIdx),
       delaySec: null,
       method: 'legs',
       tripStartMin: null
@@ -552,15 +564,18 @@
       var fix = locateBus(model, bus, prevFixes && prevFixes[bus.id]);
       if (!fix || fix.offBy > CONFIG.garageMeters) return; // garage/no-fix positions predict nothing
       if (prevFixes) prevFixes[bus.id] = { routeDist: fix.routeDist, when: bus.when };
-      var p = predictBus(model, trips, fix, bus, targetIdx, nowSecOfDay);
+      var p = predictBus(model, trips, fix, bus, targetIdx, nowSecOfDay, nowSecOfDay - status.ageSec);
       if (!p) return;
       var k = legAt(model, fix.routeDist);
-      var etaSec = Math.max(0, p.arrivalSec - nowSecOfDay);
+      // a displayed arrival is never in the past — a stale fix's "due" time
+      // floors to now rather than rendering a clock time that already went by
+      var arrivalSec = Math.max(p.arrivalSec, nowSecOfDay);
+      var etaSec = arrivalSec - nowSecOfDay;
       out.push({
         bus: bus,
         etaSec: etaSec,
         etaMin: Math.round(etaSec / 60),
-        arrivalSec: p.arrivalSec,
+        arrivalSec: arrivalSec,
         delaySec: p.delaySec,
         method: p.method,
         tripStartMin: p.tripStartMin,

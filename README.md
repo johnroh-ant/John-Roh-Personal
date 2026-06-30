@@ -46,12 +46,21 @@ stop. A bus staged at the loop terminal is assumed to depart on schedule.
 If the timetable can't be fetched, it falls back to integrating Trakk's
 per-leg scheduled durations from the bus's live position.
 
+All schedule reasoning is evaluated **as of the bus's last GPS fix**, never
+wall-clock time: when a tracker goes quiet, elapsed time doesn't count
+against the bus, so the app can never claim a shuttle "already left" without
+a fresh position actually past the stop. A quiet bus reads as "Due —
+awaiting GPS" with its last-seen position and age. Polling speeds up to
+every 15 s (from 45 s) whenever a bus is within 12 minutes or its pings have
+gone silent, and the Pusher socket uses tight activity timeouts so a dead
+connection is detected within seconds.
+
 The API allows cross-origin requests (`Access-Control-Allow-Origin: *`),
 so the page is fully static — no server or build step.
 
 ## Files
 
-- `index.html` — UI, map, live updates (polling every 45 s + Pusher pushes)
+- `index.html` — UI, map, live updates (adaptive 15–45 s polling + Pusher pushes)
 - `tracker.js` — data fetching, geometry, and prediction engine
   (also loadable from Node for testing)
 - `manifest.webmanifest`, `icons/` — PWA install support

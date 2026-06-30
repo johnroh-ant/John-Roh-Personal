@@ -182,8 +182,15 @@
 (function () {
   'use strict';
   var T = window.Tracker;
-  var POLL_MS = 45000;
-  var FRESH_MS = 2 * POLL_MS;
+  var POLL_MS = 45000;       // routine refresh
+  var POLL_FAST_MS = 15000;  // when a bus is close, or pings are quiet on a bad socket
+  var PING_QUIET_MS = 30000; // ping silence that warrants early REST polls
+  var URGENT_ETA_SEC = 12 * 60;
+  var ARRIVING_NOW_SEC = 45; // below this the hero says "Now"/"Due" instead of minutes
+  // Transport freshness for the green dot — distinct from the per-bus fix
+  // age ladder in tracker.js CONFIG (PING_QUIET_MS quiet / staleMs stale /
+  // deadMs dead), which measures GPS age, not connection health.
+  var FRESH_MS = 90000;
   var ON_SCHEDULE_MIN = 2;   // |delay| below this reads "on schedule"
   var DELAY_BADGE_MAX_MIN = 10; // beyond this, early/late attribution is ambiguous
 
@@ -203,7 +210,8 @@
     pusherOk: false,
     error: null,
     depDayKey: null,
-    modeCache: {}
+    modeCache: {},
+    topEtaSec: null
   };
 
   // Schedule minutes / stop photo are invariant per (day, mode); the cache
@@ -259,6 +267,7 @@
 
   var polling = false;
   var pollStartedAt = 0;
+  var pollGen = 0; // a superseded poll (60s escape hatch) must not clobber a newer one's state
   function poll(manual) {
     if (manual) els.refreshBtn.classList.add('spin'); // in-flight poll's finally clears it
     // the 60s escape hatch covers a fetch suspended mid-flight by the OS
@@ -266,6 +275,7 @@
     if (polling && Date.now() - pollStartedAt < 60000) return;
     polling = true;
     pollStartedAt = Date.now();
+    var gen = ++pollGen;
     var dayKey = T.dayKey();
     var needDep = !state.dep || state.depDayKey !== dayKey;
     Promise.all([
@@ -273,6 +283,7 @@
       // the timetable is secondary — never let its failure discard live data
       needDep ? T.fetchDepartures().catch(function () { return null; }) : Promise.resolve(state.dep)
     ]).then(function (res) {
+      if (gen !== pollGen) return;
       var site = res[0];
       if (Array.isArray(res[1]) && res[1] !== state.dep) {
         state.dep = res[1].filter(function (loop) { return loop && typeof loop === 'object'; });
@@ -295,12 +306,30 @@
       ensureMap();
       renderAll();
     }).catch(function (err) {
+      if (gen !== pollGen) return;
       state.error = String(err && err.message || err);
       render();
     }).finally(function () {
-      polling = false;
+      if (gen === pollGen) polling = false;
       els.refreshBtn.classList.remove('spin');
     });
+  }
+
+  // Poll faster when it matters: a bus is decision-close, or a live bus has
+  // gone ping-quiet while our socket is unhealthy (REST can only beat the
+  // ping stream when the socket is the problem — a healthy socket with a
+  // quiet device just means the device is quiet, e.g. a normal layover).
+  function pollIntervalMs() {
+    if (state.topEtaSec !== null && state.topEtaSec < URGENT_ETA_SEC) return POLL_FAST_MS;
+    if (!state.pusherOk) {
+      var now = Date.now();
+      var anyQuiet = state.buses.some(function (b) {
+        var st = T.busStatus(b, now);
+        return !st.dead && st.ageSec * 1000 > PING_QUIET_MS;
+      });
+      if (anyQuiet) return POLL_FAST_MS;
+    }
+    return POLL_MS;
   }
   els.refreshBtn.onclick = function () { poll(true); };
   document.addEventListener('visibilitychange', function () {
@@ -318,7 +347,12 @@
   function syncPusher() {
     if (!window.Pusher) return;
     if (!pusher) {
-      pusher = new Pusher(T.CONFIG.pusherKey, { cluster: T.CONFIG.pusherCluster, forceTLS: true });
+      pusher = new Pusher(T.CONFIG.pusherKey, {
+        cluster: T.CONFIG.pusherCluster, forceTLS: true,
+        // detect a silently dead socket fast — stale positions must not
+        // masquerade as live ones
+        activityTimeout: 30000, pongTimeout: 10000
+      });
       pusher.connection.bind('state_change', function (s) {
         state.pusherOk = s.current === 'connected';
         renderTicker();
@@ -377,6 +411,7 @@
 
     if (!state.model) {
       if (!state.error && !state.lastDataAt) return; // still loading
+      state.topEtaSec = null;
       els.heroBig.textContent = '—';
       els.heroBig.className = 'big dim';
       els.heroArrive.textContent = '';
@@ -389,6 +424,9 @@
     var now = new Date();
     var nowTz = T.tzNow(now);
     var preds = T.predictions(state.model, state.trips, state.buses, state.mode, state.prevFixes, now);
+    // set on every path, including the no-service early return below — a
+    // latched value would hold the fast poll cadence on a day with no buses
+    state.topEtaSec = preds[0] ? preds[0].etaSec : null;
     var schedMins = modeData().schedMins;
     var nextSched = T.nextScheduled(schedMins, nowTz.minutes, 3);
 
@@ -415,8 +453,24 @@
         els.heroBig.className = 'big dim';
         els.heroArrive.textContent = 'Next scheduled shuttle';
         els.heroDetail.textContent = 'Shuttles are between service periods right now.';
+      } else if (top.stale) {
+        // GPS is quiet: don't speak with certainty, and never imply the bus
+        // left — the prediction is pinned to its last known position
+        var ageMin = Math.max(1, Math.round(top.ageSec / 60));
+        if (top.etaSec < ARRIVING_NOW_SEC) {
+          els.heroBig.textContent = 'Due';
+          els.heroArrive.textContent = 'Bus ' + top.bus.name + ' should be there — awaiting GPS';
+        } else {
+          els.heroBig.innerHTML = top.etaMin + '<small>min</small>';
+          els.heroArrive.textContent = 'Bus ' + top.bus.name + ' · due ~' + fmtClockSec(top.arrivalSec) + ' · awaiting GPS';
+        }
+        els.heroBig.className = 'big dim';
+        els.heroDetail.textContent = top.method === 'next-trip'
+          ? 'Passed your stop before its GPS went quiet ' + ageMin + ' min ago — it comes around again next loop.'
+          : 'Last seen ' + ageMin + ' min ago, ' + miles(top.meters) + ' mi away between ' +
+            shortName(top.legFrom) + ' and ' + shortName(top.legTo) + '.';
       } else {
-        if (top.etaSec < 45) {
+        if (top.etaSec < ARRIVING_NOW_SEC) {
           els.heroBig.textContent = 'Now';
           els.heroBig.className = 'big';
           els.heroArrive.textContent = 'Bus ' + top.bus.name + ' is arriving';
@@ -431,7 +485,8 @@
       }
       // badges
       var badges = '';
-      if (top.delaySec !== null && top.method === 'schedule') {
+      // adherence can't be vouched for from a stale fix
+      if (top.delaySec !== null && top.method === 'schedule' && !top.stale) {
         var d = Math.round(top.delaySec / 60), a = Math.abs(d);
         // beyond DELAY_BADGE_MAX_MIN the early/late attribution is ambiguous
         // between two adjacent trips (the arrival time is the same either way)
@@ -585,11 +640,16 @@
 
   // ------------------------------------------------------------------ init
 
+  window.__shuttle = { state: state, pollIntervalMs: pollIntervalMs }; // debug handle
+
   setMode(state.mode, false);
   poll(false);
   // hidden tabs skip the periodic work; the visibilitychange handler
   // catches everything up on return
-  setInterval(function () { if (!document.hidden) poll(false); }, POLL_MS);
+  setInterval(function () {
+    // start-anchored cadence: a slow fetch must not stretch the period
+    if (!document.hidden && Date.now() - pollStartedAt >= pollIntervalMs()) poll(false);
+  }, 5000);
   setInterval(function () { if (!document.hidden) renderTicker(); }, 1000);
   setInterval(renderAll, 15000); // keep countdowns and bus markers honest between pings
 })();
