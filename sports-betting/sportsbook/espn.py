@@ -48,6 +48,7 @@ _EXHIBITION_NAMES = {"AFC", "NFC", "American League", "National League",
 def is_exhibition(home_team, away_team):
     return any(
         t in _EXHIBITION_NAMES or (t or "").startswith("Team ")
+        or "all-star" in (t or "").lower()
         for t in (home_team, away_team))
 
 
