@@ -69,8 +69,11 @@ def run_daily(now=None, verbose=print):
             (run_date,)).fetchall()
         slot = lambda m: "side" if m in ("spread", "moneyline") else "total"
         taken = {(r["game_id"], slot(r["market"])) for r in existing}
+        # Belt and braces on top of the slate filter: never place a bet on
+        # a game that has already started.
         fresh = [c for c in candidates
-                 if (c["game_id"], slot(c["market"])) not in taken]
+                 if (c["game_id"], slot(c["market"])) not in taken
+                 and mathutils.parse_ts(c["commence_time"]) > now]
         card = betting.pick_card(
             fresh, max(0, config.BETS_PER_DAY - len(existing)))
         for bet in card:

@@ -62,6 +62,7 @@ def side_candidates(model, game, line):
                (penalty if o["market"] == "spread" else 0.0))
     best.update(
         game_id=game["game_id"], sport=model.SPORT,
+        commence_time=game["commence_time"],
         model_line=round(-margin, 1),     # our fair home spread
         confidence=confidence_from_edge(best["edge"]),
         blended_margin=margin, model_margin=model_margin,
@@ -92,6 +93,7 @@ def total_candidates(model, game, line):
     best = max(options, key=lambda o: o["edge"])
     best.update(
         game_id=game["game_id"], sport=model.SPORT,
+        commence_time=game["commence_time"],
         model_line=round(total, 1),
         confidence=confidence_from_edge(best["edge"]),
         blended_total=total, model_total=model_total,

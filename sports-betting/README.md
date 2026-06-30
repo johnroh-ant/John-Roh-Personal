@@ -68,12 +68,21 @@ real results before the first bet.
 python3 bet.py run
 ```
 
-Schedule it (morning Pacific time works well — overnight games are final,
-the day's slates are priced):
+Schedule it for noon Pacific every day:
 
 ```cron
-30 8 * * *  cd ~/John-Roh-Personal/sports-betting && python3 bet.py run >> run.log 2>&1
+CRON_TZ=America/Los_Angeles
+0 12 * * *  cd ~/John-Roh-Personal/sports-betting && python3 bet.py run >> run.log 2>&1
 ```
+
+(If your machine's clock is already on Pacific time, the `CRON_TZ` line
+is optional.) The app never bets a game that has already started: the
+slate is strictly games starting after the run, so at a noon run
+anything that threw its first pitch or kicked off in the morning is
+analyzed-for-learning only the next day, never bet. Note this means
+early starts — NFL Sunday's 10:00 AM PT window, weekday MLB day games —
+fall outside a noon card; run earlier (e.g. `0 8 * * *`) if you want
+those slates included.
 
 ### Anytime
 

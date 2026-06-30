@@ -139,12 +139,15 @@ def fetch_scores(sport, days_from=2):
 
 
 def slate_filter(rows, now=None):
-    """Keep games starting between now and now + SLATE_HOURS."""
+    """Keep games starting strictly after now, within SLATE_HOURS.
+
+    The odds feed includes live and just-started games — those must never
+    be analyzed for betting (no betting on games already underway)."""
     now = now or dt.datetime.now(dt.timezone.utc)
     horizon = now + dt.timedelta(hours=config.SLATE_HOURS)
     out = []
     for r in rows:
         start = mathutils.parse_ts(r["commence_time"])
-        if now <= start <= horizon:
+        if now < start <= horizon:
             out.append(r)
     return out

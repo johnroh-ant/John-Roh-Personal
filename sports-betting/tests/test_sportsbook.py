@@ -82,6 +82,20 @@ class TestMath(unittest.TestCase):
         self.assertLess(win, 0.5)
 
 
+class TestSlateFilter(unittest.TestCase):
+    def test_started_and_distant_games_are_excluded(self):
+        from sportsbook import odds
+        rows = [
+            {"commence_time": "2026-06-30T14:00:00Z"},  # started 2h ago
+            {"commence_time": "2026-06-30T16:00:00Z"},  # first pitch right now
+            {"commence_time": "2026-06-30T23:00:00Z"},  # tonight -> keep
+            {"commence_time": "2026-07-02T01:00:00Z"},  # beyond 24h window
+        ]
+        kept = odds.slate_filter(rows, now=NOW)
+        self.assertEqual([r["commence_time"] for r in kept],
+                         ["2026-06-30T23:00:00Z"])
+
+
 class TestOddsClient(unittest.TestCase):
     def test_network_errors_never_leak_the_api_key(self):
         from sportsbook import odds
@@ -374,7 +388,8 @@ class TestBetting(unittest.TestCase):
 
 
 def fake_lines(sport):
-    """12 MLB games starting tonight; model edges vary by matchup."""
+    """12 MLB games starting tonight, plus one already underway (the odds
+    feed includes live games — the app must never analyze or bet it)."""
     if sport != "MLB":
         return []
     rows = []
@@ -387,6 +402,14 @@ def fake_lines(sport):
             "total": 8.5, "over_price": -110, "under_price": -110,
             "home_ml": -120 - i * 5, "away_ml": 100 + i * 5,
         })
+    rows.append({
+        "odds_id": "live-game", "commence_time": "2026-06-30T14:00:00Z",
+        "home_team": "Started Host", "away_team": "Started Visitor",
+        "home_spread": -1.5, "home_spread_price": 130,
+        "away_spread_price": -156,
+        "total": 8.5, "over_price": -110, "under_price": -110,
+        "home_ml": 400, "away_ml": -600,  # juicy in-play price: still no bet
+    })
     return rows
 
 
@@ -428,6 +451,17 @@ class TestEndToEnd(DBTestCase):
 
         self.assertEqual(len(result["analyses"]), 12)   # every game analyzed
         self.assertEqual(len(result["card"]), 10)        # exactly 10 bets
+        # the in-progress game was neither analyzed nor bet, despite its
+        # tempting in-play price
+        with db.session() as conn:
+            started = conn.execute(
+                """SELECT COUNT(*) c FROM games g
+                   LEFT JOIN predictions p ON p.game_id = g.id
+                   LEFT JOIN bets b ON b.game_id = g.id
+                   WHERE g.home_team='Started Host'
+                   AND (p.id IS NOT NULL OR b.id IS NOT NULL)"""
+            ).fetchone()["c"]
+            self.assertEqual(started, 0)
         for bet in result["card"]:
             self.assertEqual(bet["stake"], float(bet["confidence"]))
             self.assertGreaterEqual(bet["confidence"], 1)
