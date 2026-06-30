@@ -28,7 +28,10 @@ def _load_env_file():
         key, _, value = line.partition("=")
         key = key.strip()
         if key == "ODDS_API_KEY" or key.startswith("SPORTSBOOK_"):
-            os.environ.setdefault(key, value.strip().strip("'\""))
+            # a non-empty real environment variable wins; an EMPTY one
+            # (stray `export ODDS_API_KEY=`) must not shadow the file
+            if not os.environ.get(key):
+                os.environ[key] = value.strip().strip("'\"")
 
 
 _load_env_file()
