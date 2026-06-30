@@ -12,6 +12,8 @@
                                  catches up at next wake instead of
                                  skipping the day
   python bet.py status           bankroll, record by sport, pending bets
+  python bet.py history [N]      last N settled bets (default 25) with
+                                 results and running profit
   python bet.py weights          current learned model parameters
 
 Daily usage is a single (sleep-proof) cron line:
@@ -64,6 +66,28 @@ def cmd_status():
                       f"[{b['away_team']} @ {b['home_team']}]")
 
 
+def cmd_history():
+    n = int(sys.argv[2]) if len(sys.argv) > 2 else 25
+    with db.session() as conn:
+        rows = conn.execute(
+            """SELECT b.*, g.home_team, g.away_team
+               FROM bets b JOIN games g ON g.id = b.game_id
+               WHERE b.status != 'pending'
+               ORDER BY b.settled_at DESC, b.id DESC LIMIT ?""",
+            (n,)).fetchall()
+        if not rows:
+            print("no settled bets yet")
+            return
+        running = 0.0
+        for b in reversed(rows):  # oldest first, running P/L reads naturally
+            running += b["profit"]
+            print(f"  {b['run_date']} {b['sport']:6} "
+                  f"{report.bet_desc(b):34} ({b['price']:+d}) "
+                  f"${b['stake']:>3.0f}  {b['status'].upper():5} "
+                  f"{b['profit']:+8.2f}  (running {running:+,.2f})  "
+                  f"[{b['away_team']} @ {b['home_team']}]")
+
+
 def cmd_weights():
     with db.session() as conn:
         for sport in config.SPORTS:
@@ -80,6 +104,7 @@ def cmd_weights():
 COMMANDS = {
     "run": pipeline.run_daily,
     "daily": cmd_daily,
+    "history": cmd_history,
     "bootstrap": cmd_bootstrap,
     "status": cmd_status,
     "weights": cmd_weights,
