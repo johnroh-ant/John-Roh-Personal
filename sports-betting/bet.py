@@ -23,12 +23,57 @@ Daily usage is a single (sleep-proof) cron line:
   */20 * * * *  cd ~/John-Roh-Personal/sports-betting && python3 bet.py daily
 """
 
+import os
 import sys
+import zoneinfo
 
 from sportsbook import bootstrap as bootstrap_mod
-from sportsbook import config, db, pipeline, report
+from sportsbook import config, db, mathutils, pipeline, report
 from sportsbook.odds import OddsAPIError
 
+# --- terminal styling (auto-off when piped, NO_COLOR honored) ---------------
+
+_COLOR = ((sys.stdout.isatty() or os.environ.get("FORCE_COLOR"))
+          and not os.environ.get("NO_COLOR"))
+
+
+def _c(code, s):
+    return f"\033[{code}m{s}\033[0m" if _COLOR else str(s)
+
+
+def bold(s):    return _c("1", s)
+def dim(s):     return _c("2", s)
+def green(s):   return _c("32", s)
+def red(s):     return _c("31", s)
+def cyan(s):    return _c("36", s)
+def yellow(s):  return _c("33", s)
+
+
+def money(x, fmt="+,.2f"):
+    s = f"{x:{fmt}}"
+    return green(s) if x > 0 else red(s) if x < 0 else dim(s)
+
+
+def colored_status(status):
+    s = status.upper()
+    return {"WON": green(f"{s:<5}"), "LOST": red(f"{s:<5}")}.get(
+        s, dim(f"{s:<5}"))
+
+
+def local_start(ts):
+    """'Tue 4:05 PM' in the configured timezone."""
+    try:
+        t = mathutils.parse_ts(ts).astimezone(
+            zoneinfo.ZoneInfo(config.TIMEZONE))
+    except (TypeError, ValueError):
+        return ""
+    return t.strftime("%a %I:%M %p").replace(" 0", " ")
+
+
+RULE = "─" * 64
+
+
+# --- commands ----------------------------------------------------------------
 
 def cmd_daily():
     if pipeline.daily_run_due():
@@ -49,23 +94,39 @@ def cmd_bootstrap():
 def cmd_status():
     with db.session() as conn:
         s = report.bankroll_summary(conn)
-        print(f"bankroll  ${s['bankroll']:,.2f}  "
-              f"(net {s['profit']:+,.2f}, ${s['pending_stake']:,.0f} pending)")
-        for r in s["by_sport"]:
-            print(f"  {r['sport']:6} {r['record']}  "
-                  f"staked ${r['staked']:,.0f}  "
-                  f"profit {r['profit']:+,.2f}  roi {r['roi']:+.1f}%")
+        bankroll = f"${s['bankroll']:,.2f}"
+        print()
+        print(f"  {bold('BANKROLL')}  {bold(bankroll)}"
+              f"   net {money(s['profit'])}"
+              f" {dim('·')} ${s['pending_stake']:,.0f} in play")
+        if s["by_sport"]:
+            print()
+            print(dim(f"  {'sport':<7}{'record':>8}{'staked':>10}"
+                      f"{'profit':>11}{'roi':>9}"))
+            for r in s["by_sport"]:
+                sport = cyan(f"{r['sport']:<7}")
+                staked = f"${r['staked']:,.0f}"
+                roi = f"{r['roi']:+.1f}%"
+                print(f"  {sport}{r['record']:>8}"
+                      f"{staked:>10} {money(r['profit'], '+10.2f')}{roi:>9}")
         pending = conn.execute(
             """SELECT b.*, g.home_team, g.away_team, g.commence_time
                FROM bets b JOIN games g ON g.id=b.game_id
-               WHERE b.status='pending' ORDER BY g.commence_time""").fetchall()
+               WHERE b.status='pending'
+               ORDER BY b.stake DESC, g.commence_time""").fetchall()
         if pending:
-            print("\npending bets:")
+            total = sum(b["stake"] for b in pending)
+            print(f"\n  {bold('PENDING')} "
+                  f"{dim(f'({len(pending)} bets, ${total:,.0f} at risk)')}")
+            print(dim("  " + RULE))
             for b in pending:
-                print(f"  {b['run_date']} {b['sport']:6} "
-                      f"{report.bet_desc(b)} ({b['price']:+d}) "
-                      f"conf {b['confidence']} ${b['stake']:.0f} "
-                      f"[{b['away_team']} @ {b['home_team']}]")
+                desc = f"{report.bet_desc(b)} ({b['price']:+d})"
+                meta = (f"{b['away_team']} @ {b['home_team']}"
+                        f" · {local_start(b['commence_time'])}")
+                print(f"  ${b['stake']:>3.0f}  {dim('conf')} "
+                      f"{b['confidence']:>3}  {b['sport']:<6} "
+                      f"{bold(f'{desc:<34}')} {dim(meta)}")
+        print()
 
 
 def cmd_history():
@@ -80,21 +141,25 @@ def cmd_history():
         if not rows:
             print("no settled bets yet")
             return
+        print()
         running = 0.0
         for b in reversed(rows):  # oldest first, running P/L reads naturally
             running += b["profit"]
-            print(f"  {b['run_date']} {b['sport']:6} "
-                  f"{report.bet_desc(b):34} ({b['price']:+d}) "
-                  f"${b['stake']:>3.0f}  {b['status'].upper():5} "
-                  f"{b['profit']:+8.2f}  (running {running:+,.2f})  "
-                  f"[{b['away_team']} @ {b['home_team']}]")
+            desc = f"{report.bet_desc(b)} ({b['price']:+d})"
+            matchup = f"{b['away_team']} @ {b['home_team']}"
+            print(f"  {dim(b['run_date'])}  {b['sport']:<6}"
+                  f"{bold(f'{desc:<32}')} ${b['stake']:>3.0f}  "
+                  f"{colored_status(b['status'])} {money(b['profit'], '+8.2f')}"
+                  f"  {dim(f'running {running:+,.2f}')}"
+                  f"  {dim(matchup)}")
+        print()
 
 
 def cmd_analysis():
     """How the model saw every game on a day's slate: FanDuel's numbers,
-    the model's raw and market-blended lines, the situational features
-    that fed the margin, the computed edges, the bet (if any), and the
-    final score once it's in."""
+    the model's blended fair line and raw unblended line, the situational
+    features behind the margin, the edges found, the bet (if any), and
+    the final score once it's in."""
     import json
 
     date = sys.argv[2] if len(sys.argv) > 2 else None
@@ -108,7 +173,7 @@ def cmd_analysis():
             return
         preds = conn.execute(
             """SELECT p.*, g.home_team, g.away_team, g.completed,
-                      g.home_score, g.away_score
+                      g.home_score, g.away_score, g.commence_time
                FROM predictions p JOIN games g ON g.id = p.game_id
                WHERE p.run_date=? ORDER BY p.sport, g.commence_time""",
             (date,)).fetchall()
@@ -117,51 +182,67 @@ def cmd_analysis():
             return
         bets = {}
         for b in conn.execute(
-                """SELECT b.* FROM bets b WHERE b.run_date=?""", (date,)):
+                "SELECT b.* FROM bets b WHERE b.run_date=?", (date,)):
             bets.setdefault(b["game_id"], []).append(b)
 
-        print(f"analysis for {date} — {len(preds)} games\n")
+        print(f"\n  {bold(f'ANALYSIS — {date}')} "
+              f"{dim(f'({len(preds)} games, every one feeds the learner)')}\n")
         for p in preds:
             feats = json.loads(p["features"])
-            raw = feats.get("raw", {})
-            x = feats.get("x", {})
-            ctx = feats.get("ctx", {})
+            raw, x, ctx = (feats.get("raw", {}), feats.get("x", {}),
+                           feats.get("ctx", {}))
 
-            print(f"{p['sport']}  {p['away_team']} @ {p['home_team']}")
+            print(dim("  " + RULE))
+            print(f"  {cyan(bold(p['sport']))}  "
+                  f"{bold(p['away_team'] + ' @ ' + p['home_team'])}"
+                  f"  {dim(local_start(p['commence_time']))}")
+            print(dim("  " + RULE))
+
+            head = f"  {'':<11}{'spread':>9}{'total':>9}   {'ml / win%':<12}"
+            print(dim(head))
             ml = (f"{p['market_home_ml']:+d}/{p['market_away_ml']:+d}"
                   if p["market_home_ml"] is not None else "—")
             spread = (f"{p['market_home_spread']:+g}"
                       if p["market_home_spread"] is not None else "—")
             total = (f"{p['market_total']:g}"
                      if p["market_total"] is not None else "—")
-            print(f"  FanDuel   spread {spread} | total {total} | ML (H/A) {ml}")
-            raw_m = raw.get("margin")
-            raw_t = raw.get("total")
-            raw_note = (f" (model alone: {-raw_m:+.1f} / {raw_t:.1f})"
-                        if raw_m is not None else "")
-            print(f"  fair      spread {-p['pred_home_margin']:+.1f} | "
-                  f"total {p['pred_total']:.1f} | "
-                  f"home win {p['pred_home_wp']:.1%}{raw_note}")
-            parts = [f"{k}={v:+.2f}" for k, v in sorted(x.items()) if v]
-            if ctx.get("home_pitcher") or ctx.get("away_pitcher"):
-                parts.append(f"starters: {ctx.get('home_pitcher') or '?'}"
-                             f" vs {ctx.get('away_pitcher') or '?'}")
-            if parts:
-                print(f"  features  {', '.join(parts)}")
+            print(f"  {'FanDuel':<11}{spread:>9}{total:>9}   {ml:<12}")
+            print(f"  {'fair':<11}{-p['pred_home_margin']:>+9.1f}"
+                  f"{p['pred_total']:>9.1f}   {p['pred_home_wp']:.1%}")
+            if raw.get("margin") is not None:
+                print(dim(f"  {'model raw':<11}{-raw['margin']:>+9.1f}"
+                          f"{raw['total']:>9.1f}"))
+
             edges = []
             if p["side_edge"] is not None:
-                edges.append(f"best side {p['side_edge']:+.1%}")
+                e = p["side_edge"]
+                edges.append("side " + (green if e > 0 else red)(f"{e:+.1%}"))
             if p["total_edge"] is not None:
-                edges.append(f"best total {p['total_edge']:+.1%}")
+                e = p["total_edge"]
+                edges.append("total " + (green if e > 0 else red)(f"{e:+.1%}"))
             if edges:
-                print(f"  edges     {' | '.join(edges)}")
+                print(f"  {'edges':<11}" + "   ".join(edges))
+
+            inputs = " · ".join(f"{k} {v:+.2f}"
+                                for k, v in sorted(x.items()) if v)
+            if inputs:
+                print(dim(f"  {'inputs':<11}{inputs}"))
+            if ctx.get("home_pitcher") or ctx.get("away_pitcher"):
+                print(dim(f"  {'starters':<11}{ctx.get('home_pitcher') or '?'}"
+                          f" vs {ctx.get('away_pitcher') or '?'}"))
+
             for b in bets.get(p["game_id"], []):
-                print(f"  BET       {report.bet_desc(b)} ({b['price']:+d}) "
-                      f"conf {b['confidence']} ${b['stake']:.0f}"
-                      + (f" -> {b['status'].upper()} {b['profit']:+.2f}"
-                         if b["status"] != "pending" else ""))
+                line = (f"{report.bet_desc(b)} ({b['price']:+d}) "
+                        f"· conf {b['confidence']} · ${b['stake']:.0f}")
+                if b["status"] != "pending":
+                    line += f"  → {b['status'].upper()} "
+                    print(f"  {yellow(bold('★ BET'.ljust(11)))}"
+                          f"{yellow(line)}{money(b['profit'])}")
+                else:
+                    print(f"  {yellow(bold('★ BET'.ljust(11)))}{yellow(line)}")
+
             if p["completed"]:
-                print(f"  final     {p['away_team']} {p['away_score']}, "
+                print(f"  {'final':<11}{p['away_team']} {p['away_score']}, "
                       f"{p['home_team']} {p['home_score']}")
             print()
 
@@ -174,7 +255,7 @@ def cmd_weights():
                 (sport,)).fetchall()
             if not rows:
                 continue
-            print(sport)
+            print(bold(sport))
             for r in rows:
                 print(f"  {r['name']:20} {r['value']:.4f}")
 
