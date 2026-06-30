@@ -37,6 +37,20 @@ def team_match(a, b):
     return na == nb or na in nb or nb in na
 
 
+# Exhibition entities ESPN serves alongside real games — Pro Bowl
+# conferences, All-Star weekend squads, the MLB All-Star leagues. ESPN
+# labels several of these as REGULAR season games, so they must be
+# filtered by name. No real club matches these patterns.
+_EXHIBITION_NAMES = {"AFC", "NFC", "American League", "National League",
+                     "World", "USA"}
+
+
+def is_exhibition(home_team, away_team):
+    return any(
+        t in _EXHIBITION_NAMES or (t or "").startswith("Team ")
+        for t in (home_team, away_team))
+
+
 def _score_of(competitor):
     try:
         return int(competitor.get("score"))

@@ -71,6 +71,8 @@ def bootstrap(sports=None, verbose=print):
                         continue
                     if r["season_type"] == 1:  # preseason / spring training
                         continue
+                    if espn.is_exhibition(r["home_team"], r["away_team"]):
+                        continue  # Pro Bowl / All-Star weekend
                     gid = db.upsert_game(
                         conn, sport, espn_id=r["espn_id"],
                         commence_time=r["commence_time"],
