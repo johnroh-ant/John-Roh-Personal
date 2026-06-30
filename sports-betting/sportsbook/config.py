@@ -77,3 +77,8 @@ SLATE_HOURS = int(os.environ.get("SPORTSBOOK_SLATE_HOURS", "24"))
 
 # Local timezone for "the betting day" (report naming, day boundaries).
 TIMEZONE = os.environ.get("SPORTSBOOK_TZ", "America/Los_Angeles")
+
+# `bet.py daily` does real work only at/after this local time (HH:MM), and
+# only once per day — so cron can fire it every few minutes and a sleeping
+# laptop just catches up on wake.
+RUN_AFTER = os.environ.get("SPORTSBOOK_RUN_AFTER", "09:30")

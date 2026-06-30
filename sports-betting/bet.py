@@ -6,12 +6,17 @@
   python bet.py run              the daily run: settle yesterday, analyze
                                  today's slates, place the 10-bet card,
                                  write the report
+  python bet.py daily            `run`, but only once per day and only
+                                 at/after 9:30 AM local — cron fires it
+                                 every 20 min, so a laptop asleep at 9:30
+                                 catches up at next wake instead of
+                                 skipping the day
   python bet.py status           bankroll, record by sport, pending bets
   python bet.py weights          current learned model parameters
 
-Daily usage is a single cron line (9:30 AM Pacific):
+Daily usage is a single (sleep-proof) cron line:
   CRON_TZ=America/Los_Angeles
-  30 9 * * *  cd ~/John-Roh-Personal/sports-betting && python3 bet.py run
+  */20 * * * *  cd ~/John-Roh-Personal/sports-betting && python3 bet.py daily
 """
 
 import sys
@@ -19,6 +24,12 @@ import sys
 from sportsbook import bootstrap as bootstrap_mod
 from sportsbook import config, db, pipeline, report
 from sportsbook.odds import OddsAPIError
+
+
+def cmd_daily():
+    if pipeline.daily_run_due():
+        pipeline.run_daily()
+    # silent exit otherwise: cron calls this every 20 minutes
 
 
 def cmd_bootstrap():
@@ -68,6 +79,7 @@ def cmd_weights():
 
 COMMANDS = {
     "run": pipeline.run_daily,
+    "daily": cmd_daily,
     "bootstrap": cmd_bootstrap,
     "status": cmd_status,
     "weights": cmd_weights,

@@ -18,6 +18,22 @@ from . import betting, config, db, espn, mathutils, odds, report, settle
 from .models import MODELS
 
 
+def daily_run_due(now=None):
+    """Has today's run not happened yet, and is it past the scheduled time?
+
+    Drives `bet.py daily`, designed for laptops that sleep: cron fires it
+    every few minutes, this gate makes exactly one real run per day at the
+    first opportunity at/after RUN_AFTER local time. Costs no API calls
+    when it says no.
+    """
+    tz = zoneinfo.ZoneInfo(config.TIMEZONE)
+    now_local = (now or dt.datetime.now(dt.timezone.utc)).astimezone(tz)
+    if now_local.strftime("%H:%M") < config.RUN_AFTER:
+        return False
+    with db.session() as conn:
+        return db.get_meta(conn, "last_run_date") != now_local.date().isoformat()
+
+
 def local_today(now=None):
     tz = zoneinfo.ZoneInfo(config.TIMEZONE)
     return (now or dt.datetime.now(dt.timezone.utc)).astimezone(tz).date()
@@ -92,6 +108,7 @@ def run_daily(now=None, verbose=print):
         path = report.write_report(conn, run_date, analyses, card,
                                    settled["settled_bets"])
         verbose(f"-- report: {path}")
+        db.set_meta(conn, "last_run_date", run_date)
         return {"run_date": run_date, "analyses": analyses, "card": card,
                 "settled": settled, "report": path}
 

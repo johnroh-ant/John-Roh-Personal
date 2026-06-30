@@ -68,19 +68,33 @@ real results before the first bet.
 python3 bet.py run
 ```
 
-Schedule it for 9:30 AM Pacific every day:
+Schedule it for 9:30 AM Pacific every day. On a laptop that sleeps, use
+the sleep-proof form — cron silently skips jobs that fire while the
+machine is asleep, so instead cron pings `bet.py daily` every 20 minutes
+and the app itself runs exactly once per day, at the first moment at or
+after 9:30 that the laptop is awake:
 
 ```cron
 CRON_TZ=America/Los_Angeles
-30 9 * * *  cd ~/John-Roh-Personal/sports-betting && python3 bet.py run >> run.log 2>&1
+*/20 * * * *  cd ~/John-Roh-Personal/sports-betting && python3 bet.py daily >> run.log 2>&1
 ```
 
-(If your machine's clock is already on Pacific time, the `CRON_TZ` line
-is optional.) The app never bets a game that has already started: the
-slate is strictly games starting after the run. A 9:30 AM run is ahead
-of NFL Sunday's 10:00 AM PT window and standard MLB day games, so the
-full day's slates are bettable; the rare earlier start (e.g. a 9:00 AM
-PT tournament tip) is analyzed for learning only, never bet.
+The guarded pings cost nothing (no API calls, ~50ms) and exit silently.
+A machine that is always on at 9:30 can use `30 9 * * *` with `bet.py
+run` instead; both forms are safe to mix with manual `run`s — a manual
+morning run counts as that day's run. The schedule time is configurable
+via `SPORTSBOOK_RUN_AFTER` (default `09:30`) in `.env`.
+
+macOS note: if cron can't read the repo folder, either grant `cron`
+Full Disk Access (System Settings → Privacy & Security) or keep the
+clone outside `~/Documents`/`~/Desktop`/`~/Downloads` (a plain `~/`
+clone works without any changes).
+
+The app never bets a game that has already started: the slate is
+strictly games starting after the run. A 9:30 AM run is ahead of NFL
+Sunday's 10:00 AM PT window and standard MLB day games, so the full
+day's slates are bettable; the rare earlier start (e.g. a 9:00 AM PT
+tournament tip) is analyzed for learning only, never bet.
 
 ### Anytime
 

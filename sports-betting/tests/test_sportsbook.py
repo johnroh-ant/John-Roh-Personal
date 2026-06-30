@@ -129,6 +129,27 @@ class DBTestCase(unittest.TestCase):
             self.addCleanup(p.stop)
 
 
+class TestDailyGate(DBTestCase):
+    """`bet.py daily` runs once per day, at/after RUN_AFTER local time."""
+
+    def test_gate(self):
+        from sportsbook import pipeline
+        # 2026-06-30 16:00 UTC == 09:00 Pacific: too early
+        early = dt.datetime(2026, 6, 30, 16, 0, tzinfo=dt.timezone.utc)
+        self.assertFalse(pipeline.daily_run_due(now=early))
+        # 16:30 UTC == 09:30 Pacific: due
+        due = dt.datetime(2026, 6, 30, 16, 30, tzinfo=dt.timezone.utc)
+        self.assertTrue(pipeline.daily_run_due(now=due))
+        # after a completed run, no longer due that day...
+        with db.session() as conn:
+            db.set_meta(conn, "last_run_date", "2026-06-30")
+        late = dt.datetime(2026, 6, 30, 23, 0, tzinfo=dt.timezone.utc)
+        self.assertFalse(pipeline.daily_run_due(now=late))
+        # ...but due again the next day (laptop woke at 11:47)
+        next_day = dt.datetime(2026, 7, 1, 18, 47, tzinfo=dt.timezone.utc)
+        self.assertTrue(pipeline.daily_run_due(now=next_day))
+
+
 class TestModels(DBTestCase):
     def test_ratings_learn_from_results(self):
         from sportsbook.models import NBAModel
