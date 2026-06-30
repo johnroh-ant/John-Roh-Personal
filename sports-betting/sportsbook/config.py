@@ -10,6 +10,24 @@ from pathlib import Path
 # --- Paths -----------------------------------------------------------------
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+def _load_env_file():
+    """Load KEY=VALUE lines from a gitignored .env in the project root, so
+    the API key survives shell sessions and stays out of crontabs and git.
+    Real environment variables always win."""
+    env_path = ROOT / ".env"
+    if not env_path.exists():
+        return
+    for line in env_path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        os.environ.setdefault(key.strip(), value.strip().strip("'\""))
+
+
+_load_env_file()
 DATA_DIR = Path(os.environ.get("SPORTSBOOK_DATA_DIR", ROOT / "data"))
 DB_PATH = Path(os.environ.get("SPORTSBOOK_DB", DATA_DIR / "betting.db"))
 REPORTS_DIR = Path(os.environ.get("SPORTSBOOK_REPORTS_DIR", ROOT / "reports"))

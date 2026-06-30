@@ -37,9 +37,13 @@ only to you.
 ## Setup
 
 ```bash
-pip install requests              # the only dependency
-export ODDS_API_KEY=...           # free key from https://the-odds-api.com
+pip install requests                          # the only dependency
+echo 'ODDS_API_KEY=yourkey' > .env            # free key from https://the-odds-api.com
 ```
+
+The `.env` file is gitignored and loaded automatically, so the key never
+goes in your shell profile, crontab, or git history. (A real
+`ODDS_API_KEY` environment variable takes precedence if you set one.)
 
 The free Odds API tier (500 credits/month) is enough: one daily run costs
 ~12 credits for lines (3 markets × 4 sports) plus a few for score
@@ -68,7 +72,7 @@ Schedule it (morning Pacific time works well — overnight games are final,
 the day's slates are priced):
 
 ```cron
-30 8 * * *  cd ~/John-Roh-Personal/sports-betting && ODDS_API_KEY=yourkey python3 bet.py run >> run.log 2>&1
+30 8 * * *  cd ~/John-Roh-Personal/sports-betting && python3 bet.py run >> run.log 2>&1
 ```
 
 ### Anytime

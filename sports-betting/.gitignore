@@ -1,5 +1,6 @@
 data/
 reports/*.md
 run.log
+.env
 __pycache__/
 *.pyc
