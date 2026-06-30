@@ -1,0 +1,598 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Mission Bay Shuttle</title>
+<meta name="description" content="Live ETA for the Mission Bay TMA TransBay/Caltrain shuttle at 500 Howard St and Berry at Mission Creek.">
+<meta name="theme-color" content="#f15a29">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Shuttle">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+<style>
+  :root {
+    --accent: #f15a29;
+    --bg: #f6f4f1;
+    --card: #ffffff;
+    --ink: #1c1917;
+    --ink-2: #6f6a64;
+    --ink-3: #a39d96;
+    --line: #e8e4df;
+    --good: #1a8f4d;
+    --warn: #b45309;
+    --bad: #b91c1c;
+    --radius: 18px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161412;
+      --card: #211e1b;
+      --ink: #f3efea;
+      --ink-2: #a8a199;
+      --ink-3: #6f6962;
+      --line: #322e29;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  }
+  .wrap { max-width: 620px; margin: 0 auto; padding: 14px 14px 28px; }
+
+  header { display: flex; align-items: center; gap: 10px; padding: 6px 2px 14px; }
+  .live-dot { position: relative; width: 10px; height: 10px; border-radius: 50%; background: var(--ink-3); flex: none; }
+  .live-dot.on { background: var(--good); }
+  /* transform/opacity pulse stays on the compositor (box-shadow would repaint per frame) */
+  .live-dot.on::after { content: ""; position: absolute; inset: 0; border-radius: 50%; background: rgba(26,143,77,.45); animation: pulse 2s infinite; }
+  @keyframes pulse { 0% { transform: scale(1); opacity: .8; } 70% { transform: scale(2.6); opacity: 0; } 100% { transform: scale(1); opacity: 0; } }
+  header h1 { font-size: 17px; font-weight: 700; margin: 0; letter-spacing: -.01em; }
+  header .route { font-size: 12px; color: var(--ink-2); margin-top: 1px; }
+  header .spacer { flex: 1; }
+  #refreshBtn {
+    border: 1px solid var(--line); background: var(--card); color: var(--ink-2);
+    width: 38px; height: 38px; border-radius: 12px; font-size: 17px; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+  }
+  #refreshBtn.spin svg { animation: rot 0.9s linear infinite; }
+  @keyframes rot { to { transform: rotate(360deg); } }
+
+  .seg { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 6px; }
+  .seg button {
+    border: 0; border-radius: 13px; padding: 11px 8px; background: transparent; cursor: pointer;
+    font: inherit; font-weight: 600; font-size: 14.5px; color: var(--ink-2); transition: background .15s, color .15s;
+  }
+  .seg button .sub { display: block; font-weight: 500; font-size: 11.5px; opacity: .75; margin-top: 1px; }
+  .seg button.active { background: var(--accent); color: #fff; }
+
+  .hero { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); margin-top: 12px; padding: 22px 20px 18px; text-align: center; }
+  .hero .stop-name { font-size: 13px; font-weight: 600; color: var(--ink-2); text-transform: uppercase; letter-spacing: .06em; }
+  .hero .big { font-size: 64px; font-weight: 800; letter-spacing: -.03em; line-height: 1.05; margin: 6px 0 2px; font-variant-numeric: tabular-nums; }
+  .hero .big small { font-size: 26px; font-weight: 700; color: var(--ink-2); margin-left: 4px; }
+  .hero .big.dim { color: var(--ink-2); font-size: 40px; }
+  .hero .arrive { font-size: 16px; font-weight: 600; }
+  .hero .detail { font-size: 13.5px; color: var(--ink-2); margin-top: 6px; }
+  .hero .badges { margin-top: 10px; display: flex; gap: 6px; justify-content: center; flex-wrap: wrap; }
+  .badge { font-size: 11.5px; font-weight: 600; border-radius: 999px; padding: 3px 10px; background: var(--bg); color: var(--ink-2); border: 1px solid var(--line); }
+  .badge.late { color: var(--warn); }
+  .badge.early { color: var(--good); }
+  .badge.warn { color: var(--bad); }
+
+  .rows { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; }
+  .row { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 11px 14px; display: flex; align-items: baseline; gap: 10px; font-size: 14px; }
+  .row .bus { font-weight: 700; flex: none; }
+  .row .where { color: var(--ink-2); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row .eta { font-weight: 700; flex: none; font-variant-numeric: tabular-nums; }
+  .row .eta small { color: var(--ink-2); font-weight: 500; }
+
+  .sched { margin-top: 12px; background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 11px 14px; font-size: 13.5px; color: var(--ink-2); display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+  .sched b { color: var(--ink); font-variant-numeric: tabular-nums; }
+
+  #map { height: 46vh; min-height: 300px; border-radius: var(--radius); border: 1px solid var(--line); margin-top: 12px; background: var(--card); }
+  /* glide bus pins between GPS pings; static stop pins don't need it and the
+     transition must not fight Leaflet's own zoom animation */
+  .leaflet-marker-icon.bus-pin { transition: transform 1.2s linear; }
+  .leaflet-zoom-anim .leaflet-marker-icon.bus-pin { transition: none; }
+  .bus-pin { background: var(--accent); color: #fff; border-radius: 10px; border: 2px solid #fff;
+    box-shadow: 0 1px 6px rgba(0,0,0,.35); font: 700 11px/1 system-ui, sans-serif;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px; }
+  .bus-pin.stale { background: var(--ink-3); }
+  .bus-pin span { font-size: 14px; }
+  .stop-pin { background: #fff; border: 2.5px solid var(--accent); border-radius: 50%; box-shadow: 0 1px 3px rgba(0,0,0,.25); }
+  .target-pin { position: relative; }
+  .target-pin .ring { position: absolute; inset: -7px; border-radius: 50%; border: 2px solid var(--accent); animation: ringpulse 1.8s ease-out infinite; }
+  @keyframes ringpulse { 0% { transform: scale(.6); opacity: 1; } 100% { transform: scale(1.5); opacity: 0; } }
+  .target-pin .core { position: absolute; inset: 0; background: var(--accent); border: 2.5px solid #fff; border-radius: 50%; box-shadow: 0 1px 4px rgba(0,0,0,.35); }
+
+  details.photo { margin-top: 12px; background: var(--card); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; }
+  details.photo summary { padding: 11px 14px; font-size: 13.5px; font-weight: 600; color: var(--ink-2); cursor: pointer; list-style: none; display: flex; justify-content: space-between; }
+  details.photo summary::-webkit-details-marker { display: none; }
+  details.photo summary::after { content: "+"; font-weight: 700; }
+  details.photo[open] summary::after { content: "–"; }
+  details.photo img { display: block; width: 100%; }
+
+  .note { margin-top: 14px; font-size: 12px; color: var(--ink-3); text-align: center; }
+  .note a { color: var(--ink-2); }
+  #updated { font-variant-numeric: tabular-nums; }
+  .error { background: #fef2f2; border: 1px solid #fecaca; color: var(--bad); border-radius: 14px; padding: 12px 14px; margin-top: 12px; font-size: 14px; display: none; }
+  @media (prefers-color-scheme: dark) { .error { background: #2a1414; border-color: #5b1f1f; } }
+  .skeleton { color: var(--ink-3); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="live-dot" id="liveDot"></div>
+    <div>
+      <h1>Mission Bay Shuttle</h1>
+      <div class="route">TransBay / Caltrain loop · live</div>
+    </div>
+    <div class="spacer"></div>
+    <button id="refreshBtn" title="Refresh now" aria-label="Refresh now">
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
+    </button>
+  </header>
+
+  <div class="seg" role="tablist" aria-label="Direction">
+    <button id="modeHome" role="tab">Leaving work<span class="sub">pickup at 500 Howard St</span></button>
+    <button id="modeWork" role="tab">Going to work<span class="sub">pickup at Berry @ Mission Creek</span></button>
+  </div>
+
+  <div class="hero" id="hero">
+    <div class="stop-name" id="heroStop">&nbsp;</div>
+    <div class="big skeleton" id="heroBig">…</div>
+    <div class="arrive" id="heroArrive">&nbsp;</div>
+    <div class="detail" id="heroDetail">Loading live shuttle data…</div>
+    <div class="badges" id="heroBadges"></div>
+  </div>
+
+  <div class="error" id="errorBox"></div>
+  <div class="rows" id="rows"></div>
+  <div class="sched" id="sched" style="display:none"></div>
+
+  <div id="map"></div>
+
+  <details class="photo" id="photoBox" style="display:none">
+    <summary>What this stop looks like</summary>
+    <img id="photoImg" alt="Photo of the shuttle stop" loading="lazy">
+  </details>
+
+  <div class="note">
+    <span id="updated">connecting…</span><br>
+    Unofficial tracker · live data from the
+    <a href="https://www.missionbaytma.org/real-time-predictions-map/" target="_blank" rel="noopener">Mission Bay TMA map</a> (Trakk)
+  </div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<script src="https://js.pusher.com/8.2.0/pusher.min.js"
+        integrity="sha256-+ds/9n0yh0+RQciTuOSBWSGYYwdN8LrNVR93R76EkWM=" crossorigin="anonymous"></script>
+<script src="tracker.js"></script>
+<script>
+(function () {
+  'use strict';
+  var T = window.Tracker;
+  var POLL_MS = 45000;
+  var FRESH_MS = 2 * POLL_MS;
+  var ON_SCHEDULE_MIN = 2;   // |delay| below this reads "on schedule"
+  var DELAY_BADGE_MAX_MIN = 10; // beyond this, early/late attribution is ambiguous
+
+  var els = {};
+  ['liveDot', 'refreshBtn', 'modeHome', 'modeWork', 'heroStop', 'heroBig',
+    'heroArrive', 'heroDetail', 'heroBadges', 'errorBox', 'rows', 'sched',
+    'photoBox', 'photoImg', 'updated'].forEach(function (id) { els[id] = document.getElementById(id); });
+
+  var state = {
+    mode: defaultMode(),
+    model: null,
+    dep: null,
+    trips: null,
+    buses: [],
+    prevFixes: {},
+    lastDataAt: 0,
+    pusherOk: false,
+    error: null,
+    depDayKey: null,
+    modeCache: {}
+  };
+
+  // Schedule minutes / stop photo are invariant per (day, mode); the cache
+  // is cleared whenever the departure data is refetched.
+  function modeData() {
+    if (!state.modeCache[state.mode]) {
+      state.modeCache[state.mode] = {
+        schedMins: T.stopScheduleMinutes(state.dep, state.mode),
+        photo: T.stopImage(state.dep, state.mode)
+      };
+    }
+    return state.modeCache[state.mode];
+  }
+
+  // ------------------------------------------------------------------ mode
+
+  function defaultMode() {
+    try {
+      var saved = JSON.parse(localStorage.getItem('shuttle-mode') || 'null');
+      if (saved && (saved.mode === 'home' || saved.mode === 'work') &&
+          Date.now() - saved.at < 4 * 3600 * 1000) return saved.mode;
+    } catch (e) { /* ignore */ }
+    // AM service ends ~10:12; after that the actionable view is the ride home
+    return T.tzNow().minutes < 10 * 60 + 30 ? 'work' : 'home';
+  }
+
+  // Coalesce render bursts (several near-simultaneous Pusher pings) into one
+  // frame; rAF also pauses rendering while the tab is hidden.
+  var renderQueued = false;
+  function renderAll() {
+    if (renderQueued) return;
+    renderQueued = true;
+    requestAnimationFrame(function () {
+      renderQueued = false;
+      render();
+      renderMap();
+    });
+  }
+
+  function setMode(mode, fromUser) {
+    state.mode = mode;
+    if (fromUser) {
+      try { localStorage.setItem('shuttle-mode', JSON.stringify({ mode: mode, at: Date.now() })); } catch (e) { /* ignore */ }
+    }
+    els.modeHome.classList.toggle('active', mode === 'home');
+    els.modeWork.classList.toggle('active', mode === 'work');
+    renderAll();
+  }
+  els.modeHome.onclick = function () { setMode('home', true); };
+  els.modeWork.onclick = function () { setMode('work', true); };
+
+  // ----------------------------------------------------------------- fetch
+
+  var polling = false;
+  var pollStartedAt = 0;
+  function poll(manual) {
+    if (manual) els.refreshBtn.classList.add('spin'); // in-flight poll's finally clears it
+    // the 60s escape hatch covers a fetch suspended mid-flight by the OS
+    // (mobile sleep) that never settles despite the request timeout
+    if (polling && Date.now() - pollStartedAt < 60000) return;
+    polling = true;
+    pollStartedAt = Date.now();
+    var dayKey = T.dayKey();
+    var needDep = !state.dep || state.depDayKey !== dayKey;
+    Promise.all([
+      T.fetchLiveSite(),
+      // the timetable is secondary — never let its failure discard live data
+      needDep ? T.fetchDepartures().catch(function () { return null; }) : Promise.resolve(state.dep)
+    ]).then(function (res) {
+      var site = res[0];
+      if (Array.isArray(res[1]) && res[1] !== state.dep) {
+        state.dep = res[1].filter(function (loop) { return loop && typeof loop === 'object'; });
+        state.depDayKey = dayKey;
+        state.modeCache = {};
+      }
+      try {
+        state.model = T.buildLoopModel(site) || state.model;
+        state.trips = state.model && state.dep ? T.buildTrips(state.dep, state.model) : state.trips;
+      } catch (e) { /* keep the previous model/trips on malformed data */ }
+      // merge, keeping any fresher Pusher ping that arrived mid-fetch
+      var prev = {};
+      state.buses.forEach(function (b) { prev[b.id] = b; });
+      state.buses = T.extractBuses(site).map(function (b) {
+        return prev[b.id] && prev[b.id].when > b.when ? prev[b.id] : b;
+      });
+      state.lastDataAt = Date.now();
+      state.error = null;
+      syncPusher();
+      ensureMap();
+      renderAll();
+    }).catch(function (err) {
+      state.error = String(err && err.message || err);
+      render();
+    }).finally(function () {
+      polling = false;
+      els.refreshBtn.classList.remove('spin');
+    });
+  }
+  els.refreshBtn.onclick = function () { poll(true); };
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState !== 'visible') return;
+    // a long-suspended PWA may wake on a new day or commute period
+    var fresh = defaultMode();
+    if (fresh !== state.mode) setMode(fresh, false);
+    if (Date.now() - state.lastDataAt > 15000) poll(false);
+  });
+
+  // ---------------------------------------------------------------- pusher
+
+  var pusher = null;
+  var subscribed = new Set();
+  function syncPusher() {
+    if (!window.Pusher) return;
+    if (!pusher) {
+      pusher = new Pusher(T.CONFIG.pusherKey, { cluster: T.CONFIG.pusherCluster, forceTLS: true });
+      pusher.connection.bind('state_change', function (s) {
+        state.pusherOk = s.current === 'connected';
+        renderTicker();
+      });
+      // new vehicle coming online on this run
+      pusher.subscribe(T.CONFIG.runId).bind('device_online', function () { poll(false); });
+    }
+    var current = new Set(state.buses.map(function (b) { return b.id; }));
+    subscribed.forEach(function (id) {
+      if (current.has(id)) return;
+      pusher.unsubscribe(id);
+      subscribed.delete(id);
+    });
+    state.buses.forEach(function (bus) {
+      if (subscribed.has(bus.id)) return;
+      subscribed.add(bus.id);
+      var ch = pusher.subscribe(bus.id);
+      ch.bind('ping_update', function (ping) {
+        var b = state.buses.find(function (x) { return x.id === bus.id; });
+        if (b && T.applyPing(b, ping)) {
+          state.lastDataAt = Date.now();
+          renderAll();
+        }
+      });
+      ch.bind('run_changed', function (data) {
+        if (data && data.hasOwnProperty('onRun') && data.onRun === null) poll(false);
+      });
+    });
+  }
+
+  // ---------------------------------------------------------------- render
+
+  function fmtClockSec(secOfDay) {
+    return T.fmtClock(Math.round(secOfDay / 60) % 1440);
+  }
+  function miles(m) { return (m / 1609.34).toFixed(1); }
+  function esc(s) {
+    return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; });
+  }
+  function shortName(name) {
+    return name.replace(' Financial', '').replace(' (Caltrain)', '').replace('MBBS @ ', '').replace(' Street 181', ' St');
+  }
+  function renderSched(mins) {
+    if (mins.length) {
+      els.sched.style.display = 'flex';
+      els.sched.innerHTML = 'Timetable at this stop: ' + mins.map(function (m) { return '<b>' + T.fmtClock(m) + '</b>'; }).join(' · ');
+    } else {
+      els.sched.style.display = 'none';
+    }
+  }
+
+  function render() {
+    els.heroStop.textContent = T.CONFIG.modes[state.mode].label;
+    els.errorBox.style.display = state.error ? 'block' : 'none';
+    if (state.error) els.errorBox.textContent = 'Could not reach the live tracking service: ' + state.error + ' — retrying automatically.';
+
+    if (!state.model) {
+      if (!state.error && !state.lastDataAt) return; // still loading
+      els.heroBig.textContent = '—';
+      els.heroBig.className = 'big dim';
+      els.heroArrive.textContent = '';
+      els.heroDetail.textContent = state.error ? 'No data yet.'
+        : 'The tracking service responded but the route data is unusable right now.';
+      renderSched(!state.error && state.dep ? T.nextScheduled(modeData().schedMins, T.tzNow().minutes, 3) : []);
+      return;
+    }
+
+    var now = new Date();
+    var nowTz = T.tzNow(now);
+    var preds = T.predictions(state.model, state.trips, state.buses, state.mode, state.prevFixes, now);
+    var schedMins = modeData().schedMins;
+    var nextSched = T.nextScheduled(schedMins, nowTz.minutes, 3);
+
+    els.heroBadges.innerHTML = '';
+    els.rows.innerHTML = '';
+
+    if (!T.operatesToday(state.model, nowTz)) {
+      els.heroBig.textContent = 'No service';
+      els.heroBig.className = 'big dim';
+      els.heroArrive.textContent = 'The shuttle runs Monday – Friday.';
+      els.heroDetail.textContent = schedMins.length ? 'First weekday pickup at ' + T.fmtClock(schedMins[0]) + '.' : '';
+      els.sched.style.display = 'none';
+      renderPhoto();
+      renderTicker();
+      return;
+    }
+
+    var top = preds[0];
+    if (top) {
+      if (top.method === 'scheduled-only') {
+        // between service periods the clock time is the readable answer,
+        // not a 3-digit minute count
+        els.heroBig.textContent = fmtClockSec(top.arrivalSec);
+        els.heroBig.className = 'big dim';
+        els.heroArrive.textContent = 'Next scheduled shuttle';
+        els.heroDetail.textContent = 'Shuttles are between service periods right now.';
+      } else {
+        if (top.etaSec < 45) {
+          els.heroBig.textContent = 'Now';
+          els.heroBig.className = 'big';
+          els.heroArrive.textContent = 'Bus ' + top.bus.name + ' is arriving';
+        } else {
+          els.heroBig.innerHTML = top.etaMin + '<small>min</small>';
+          els.heroBig.className = 'big';
+          els.heroArrive.textContent = 'Bus ' + top.bus.name + ' · arrives ~' + fmtClockSec(top.arrivalSec);
+        }
+        els.heroDetail.textContent = top.method === 'next-trip'
+          ? 'This bus already passed your stop — it comes around again next loop.'
+          : miles(top.meters) + ' mi away · between ' + shortName(top.legFrom) + ' and ' + shortName(top.legTo);
+      }
+      // badges
+      var badges = '';
+      if (top.delaySec !== null && top.method === 'schedule') {
+        var d = Math.round(top.delaySec / 60), a = Math.abs(d);
+        // beyond DELAY_BADGE_MAX_MIN the early/late attribution is ambiguous
+        // between two adjacent trips (the arrival time is the same either way)
+        if (a < ON_SCHEDULE_MIN) badges += '<span class="badge">on schedule</span>';
+        else if (a <= DELAY_BADGE_MAX_MIN) badges += '<span class="badge ' + (d > 0 ? 'late' : 'early') + '">running ~' + a + ' min ' + (d > 0 ? 'late' : 'early') + '</span>';
+      }
+      if (top.method === 'next-trip') badges += '<span class="badge">after loop turnaround</span>';
+      if (top.method === 'legs') badges += '<span class="badge">position-based estimate</span>';
+      if (top.stale) badges += '<span class="badge warn">GPS ' + Math.round(top.ageSec / 60) + ' min old</span>';
+      if (top.offRoute) badges += '<span class="badge warn">off usual route — approximate</span>';
+      els.heroBadges.innerHTML = badges;
+    } else {
+      els.heroBig.className = 'big dim';
+      if (nextSched.length) {
+        els.heroBig.textContent = T.fmtClock(nextSched[0]);
+        els.heroArrive.textContent = 'Next scheduled shuttle';
+        els.heroDetail.textContent = 'No shuttle is live on the route right now.';
+      } else {
+        els.heroBig.textContent = 'Done for today';
+        els.heroArrive.textContent = '';
+        els.heroDetail.textContent = schedMins.length
+          ? 'Service resumes ' + T.nextServiceDayLabel(state.model, nowTz.weekday) + ' at ' + T.fmtClock(schedMins[0]) + '.'
+          : '';
+      }
+    }
+
+    // secondary bus rows
+    preds.slice(1).forEach(function (p) {
+      var div = document.createElement('div');
+      div.className = 'row';
+      var when = p.method === 'scheduled-only' ? 'sched ' + fmtClockSec(p.arrivalSec)
+        : p.etaMin + ' min <small>~' + fmtClockSec(p.arrivalSec) + '</small>';
+      var where = p.method === 'scheduled-only' ? 'parked between service periods'
+        : p.method === 'next-trip' ? 'passed this stop · comes around next loop'
+          : 'between ' + esc(shortName(p.legFrom)) + ' &amp; ' + esc(shortName(p.legTo)) + (p.stale ? ' · stale GPS' : '');
+      div.innerHTML = '<span class="bus">Bus ' + esc(p.bus.name) + '</span>' +
+        '<span class="where">' + where + '</span>' +
+        '<span class="eta">' + when + '</span>';
+      els.rows.appendChild(div);
+    });
+
+    renderSched(nextSched);
+    renderPhoto();
+    renderTicker();
+  }
+
+  function renderPhoto() {
+    var url = state.dep ? modeData().photo : null;
+    // a URL that failed to load stays hidden until the daily refetch
+    // rotates the signed link
+    if (url && els.photoImg.dataset.failed !== url) {
+      if (els.photoImg.dataset.src !== url) { els.photoImg.src = url; els.photoImg.dataset.src = url; }
+      els.photoBox.style.display = 'block';
+    } else {
+      els.photoBox.style.display = 'none';
+    }
+  }
+  els.photoImg.onerror = function () {
+    els.photoImg.dataset.failed = els.photoImg.dataset.src;
+    els.photoBox.style.display = 'none';
+  };
+
+  function renderTicker() {
+    var fresh = Date.now() - state.lastDataAt < FRESH_MS;
+    els.liveDot.className = 'live-dot' + (fresh && state.pusherOk ? ' on' : '');
+    if (!state.lastDataAt) { els.updated.textContent = 'connecting…'; return; }
+    var s = Math.round((Date.now() - state.lastDataAt) / 1000);
+    els.updated.textContent = 'Updated ' + (s < 2 ? 'just now' : s + 's ago') + (state.pusherOk ? ' · live feed connected' : ' · polling');
+  }
+
+  // ------------------------------------------------------------------- map
+
+  var map = null, busMarkers = {}, stopLayer = null, targetMarker = null, routeLine = null;
+  function accentColor() {
+    return (getComputedStyle(document.documentElement).getPropertyValue('--accent') || '#f15a29').trim();
+  }
+  function ensureMap() {
+    if (map || !state.model || !window.L) return;
+    map = L.map('map', { zoomControl: true, attributionControl: true });
+    var darkMap = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/' + (darkMap ? 'dark_all' : 'voyager') + '/{z}/{x}/{y}{r}.png', {
+      maxZoom: 19,
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> &copy; <a href="https://carto.com/attributions">CARTO</a>'
+    }).addTo(map);
+    var pts = state.model.path.verts.map(function (v) { return [v.lat, v.lng]; });
+    routeLine = L.polyline(pts, { color: accentColor(), weight: 4, opacity: 0.75 }).addTo(map);
+    map.fitBounds(routeLine.getBounds(), { padding: [24, 24] });
+  }
+
+  function renderMap() {
+    if (!map || !state.model) return;
+    // stops (rebuild when the mode or the model's stop set changes)
+    var layerKey = state.mode + '|' + state.model.stops.map(function (s) { return s.id; }).join(',');
+    if (!stopLayer || stopLayer._key !== layerKey) {
+      if (stopLayer) map.removeLayer(stopLayer);
+      if (targetMarker) map.removeLayer(targetMarker);
+      routeLine.setLatLngs(state.model.path.verts.map(function (v) { return [v.lat, v.lng]; }));
+      stopLayer = L.layerGroup();
+      stopLayer._key = layerKey;
+      var targetIdx = T.findStopIndex(state.model, state.mode);
+      state.model.stops.forEach(function (s, i) {
+        if (s.isTerminalDup) return;
+        if (i === targetIdx) return;
+        L.marker([s.lat, s.lng], {
+          icon: L.divIcon({ className: 'stop-pin', iconSize: [11, 11] }),
+          title: s.name, keyboard: false
+        }).bindPopup(esc(s.name)).addTo(stopLayer);
+      });
+      stopLayer.addTo(map);
+      var t = state.model.stops[targetIdx];
+      if (t) {
+        targetMarker = L.marker([t.lat, t.lng], {
+          icon: L.divIcon({ className: 'target-pin', iconSize: [17, 17], html: '<div class="ring"></div><div class="core"></div>' }),
+          title: t.name, zIndexOffset: 500
+        }).bindPopup('<b>' + esc(t.name) + '</b><br>Your pickup stop').addTo(map);
+      }
+    }
+    // buses
+    var seen = {};
+    var now = Date.now();
+    state.buses.forEach(function (bus) {
+      var status = T.busStatus(bus, now);
+      if (status.dead) return;
+      seen[bus.id] = true;
+      var iconKey = bus.name + '|' + status.stale;
+      var marker = busMarkers[bus.id];
+      if (!marker) {
+        marker = busMarkers[bus.id] = L.marker([bus.lat, bus.lng], { zIndexOffset: 1000 }).bindPopup('');
+        marker._iconKey = null;
+        marker.addTo(map);
+      }
+      if (marker._iconKey !== iconKey) {
+        // only swap the DOM node when the look changes, so the CSS
+        // transform transition can animate position updates
+        marker.setIcon(L.divIcon({
+          className: 'bus-pin' + (status.stale ? ' stale' : ''),
+          iconSize: [44, 40],
+          html: '<span>&#128653;</span>' + esc(bus.name)
+        }));
+        marker._iconKey = iconKey;
+      }
+      marker.setLatLng([bus.lat, bus.lng]);
+      var mph = Math.round((bus.speed || 0) * 2.23694);
+      marker.setPopupContent('<b>Bus ' + esc(bus.name) + '</b><br>' + mph + ' mph · GPS ' +
+        Math.max(0, status.ageSec) + 's ago');
+    });
+    Object.keys(busMarkers).forEach(function (id) {
+      if (!seen[id]) { map.removeLayer(busMarkers[id]); delete busMarkers[id]; }
+    });
+  }
+
+  // ------------------------------------------------------------------ init
+
+  setMode(state.mode, false);
+  poll(false);
+  // hidden tabs skip the periodic work; the visibilitychange handler
+  // catches everything up on return
+  setInterval(function () { if (!document.hidden) poll(false); }, POLL_MS);
+  setInterval(function () { if (!document.hidden) renderTicker(); }, 1000);
+  setInterval(renderAll, 15000); // keep countdowns and bus markers honest between pings
+})();
+</script>
+</body>
+</html>
