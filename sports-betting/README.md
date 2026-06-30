@@ -96,12 +96,17 @@ Sunday's 10:00 AM PT window and standard MLB day games, so the full
 day's slates are bettable; the rare earlier start (e.g. a 9:00 AM PT
 tournament tip) is analyzed for learning only, never bet.
 
-### Anytime
+## All commands
 
-```bash
-python3 bet.py status    # bankroll, record by sport, pending bets
-python3 bet.py weights   # current learned model parameters
-```
+| Command | What it does |
+|---|---|
+| `python3 bet.py run` | The full daily cycle, right now: settle pending bets, learn from every analyzed game, fetch FanDuel lines, analyze today's slates, place the 10-bet card, write `reports/YYYY-MM-DD.md`. |
+| `python3 bet.py daily` | Same as `run`, but gated: executes only once per day and only at/after 9:30 AM local (`SPORTSBOOK_RUN_AFTER`). This is what cron calls every 20 minutes — a guarded ping costs no API calls and exits silently. |
+| `python3 bet.py bootstrap [sport ...]` | One-time: backfill the previous full season plus the current season from ESPN and replay it through the models to seed ratings. All four sports by default, or e.g. `bootstrap mlb nba`. Already-bootstrapped sports are skipped. |
+| `python3 bet.py status` | Bankroll, W-L-P record / staked / profit / ROI per sport, and every pending bet. |
+| `python3 bet.py history [N]` | The last N settled bets (default 25), oldest first, with result, profit, and running P/L. |
+| `python3 bet.py analysis [DATE]` | How the model saw every game on a day's slate (default: the most recent run): FanDuel's spread/total/moneyline, the model's fair line and raw unblended line, home win probability, the situational features behind the number (rest, back-to-backs, starting pitchers and their learned gap), the best side/total edge found, the bet placed if any, and the final score once known. DATE is `YYYY-MM-DD`. |
+| `python3 bet.py weights` | The learned parameters as they evolve: home advantage, rest/back-to-back/pitcher weights, totals bias, park offsets, calibration (a, b), and the model-vs-market trust trackers. |
 
 ## Behavior notes
 

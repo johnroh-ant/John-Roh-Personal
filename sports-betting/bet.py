@@ -14,6 +14,8 @@
   python bet.py status           bankroll, record by sport, pending bets
   python bet.py history [N]      last N settled bets (default 25) with
                                  results and running profit
+  python bet.py analysis [DATE]  how the model saw every game on a day's
+                                 slate (default: most recent run)
   python bet.py weights          current learned model parameters
 
 Daily usage is a single (sleep-proof) cron line:
@@ -88,6 +90,82 @@ def cmd_history():
                   f"[{b['away_team']} @ {b['home_team']}]")
 
 
+def cmd_analysis():
+    """How the model saw every game on a day's slate: FanDuel's numbers,
+    the model's raw and market-blended lines, the situational features
+    that fed the margin, the computed edges, the bet (if any), and the
+    final score once it's in."""
+    import json
+
+    date = sys.argv[2] if len(sys.argv) > 2 else None
+    with db.session() as conn:
+        if date is None:
+            row = conn.execute(
+                "SELECT MAX(run_date) d FROM predictions").fetchone()
+            date = row["d"]
+        if not date:
+            print("no analysis recorded yet — run `bet.py run` first")
+            return
+        preds = conn.execute(
+            """SELECT p.*, g.home_team, g.away_team, g.completed,
+                      g.home_score, g.away_score
+               FROM predictions p JOIN games g ON g.id = p.game_id
+               WHERE p.run_date=? ORDER BY p.sport, g.commence_time""",
+            (date,)).fetchall()
+        if not preds:
+            print(f"no analysis recorded for {date}")
+            return
+        bets = {}
+        for b in conn.execute(
+                """SELECT b.* FROM bets b WHERE b.run_date=?""", (date,)):
+            bets.setdefault(b["game_id"], []).append(b)
+
+        print(f"analysis for {date} — {len(preds)} games\n")
+        for p in preds:
+            feats = json.loads(p["features"])
+            raw = feats.get("raw", {})
+            x = feats.get("x", {})
+            ctx = feats.get("ctx", {})
+
+            print(f"{p['sport']}  {p['away_team']} @ {p['home_team']}")
+            ml = (f"{p['market_home_ml']:+d}/{p['market_away_ml']:+d}"
+                  if p["market_home_ml"] is not None else "—")
+            spread = (f"{p['market_home_spread']:+g}"
+                      if p["market_home_spread"] is not None else "—")
+            total = (f"{p['market_total']:g}"
+                     if p["market_total"] is not None else "—")
+            print(f"  FanDuel   spread {spread} | total {total} | ML (H/A) {ml}")
+            raw_m = raw.get("margin")
+            raw_t = raw.get("total")
+            raw_note = (f" (model alone: {-raw_m:+.1f} / {raw_t:.1f})"
+                        if raw_m is not None else "")
+            print(f"  fair      spread {-p['pred_home_margin']:+.1f} | "
+                  f"total {p['pred_total']:.1f} | "
+                  f"home win {p['pred_home_wp']:.1%}{raw_note}")
+            parts = [f"{k}={v:+.2f}" for k, v in sorted(x.items()) if v]
+            if ctx.get("home_pitcher") or ctx.get("away_pitcher"):
+                parts.append(f"starters: {ctx.get('home_pitcher') or '?'}"
+                             f" vs {ctx.get('away_pitcher') or '?'}")
+            if parts:
+                print(f"  features  {', '.join(parts)}")
+            edges = []
+            if p["side_edge"] is not None:
+                edges.append(f"best side {p['side_edge']:+.1%}")
+            if p["total_edge"] is not None:
+                edges.append(f"best total {p['total_edge']:+.1%}")
+            if edges:
+                print(f"  edges     {' | '.join(edges)}")
+            for b in bets.get(p["game_id"], []):
+                print(f"  BET       {report.bet_desc(b)} ({b['price']:+d}) "
+                      f"conf {b['confidence']} ${b['stake']:.0f}"
+                      + (f" -> {b['status'].upper()} {b['profit']:+.2f}"
+                         if b["status"] != "pending" else ""))
+            if p["completed"]:
+                print(f"  final     {p['away_team']} {p['away_score']}, "
+                      f"{p['home_team']} {p['home_score']}")
+            print()
+
+
 def cmd_weights():
     with db.session() as conn:
         for sport in config.SPORTS:
@@ -105,6 +183,7 @@ COMMANDS = {
     "run": pipeline.run_daily,
     "daily": cmd_daily,
     "history": cmd_history,
+    "analysis": cmd_analysis,
     "bootstrap": cmd_bootstrap,
     "status": cmd_status,
     "weights": cmd_weights,
