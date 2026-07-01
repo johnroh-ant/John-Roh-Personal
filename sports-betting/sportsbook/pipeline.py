@@ -52,6 +52,11 @@ def run_daily(now=None, verbose=print):
                 f"voided {settled['voided']}, "
                 f"learned from {settled['learned_games']} games")
 
+        dropped = _drop_future_day_bets(conn)
+        if dropped:
+            verbose(f"   removed {dropped} pending bet(s) on games outside "
+                    f"their betting day")
+
         verbose("-- fetching FanDuel lines and analyzing slates...")
         active = odds.fetch_active_sport_keys()  # free call; None = unknown
         analyses, candidates = [], []
@@ -111,6 +116,28 @@ def run_daily(now=None, verbose=print):
         db.set_meta(conn, "last_run_date", run_date)
         return {"run_date": run_date, "analyses": analyses, "card": card,
                 "settled": settled, "report": path}
+
+
+def _drop_future_day_bets(conn):
+    """Enforce the bets-only-today invariant retroactively: a pending bet
+    whose game starts on a LATER local calendar day than the bet's
+    run_date should never have been placed — remove it, freeing that
+    day's slot to be refilled from the correct slate. (Settled bets are
+    history and are never touched.)"""
+    tz = zoneinfo.ZoneInfo(config.TIMEZONE)
+    rows = conn.execute(
+        """SELECT b.id, b.run_date, g.commence_time
+           FROM bets b JOIN games g ON g.id = b.game_id
+           WHERE b.status='pending'""").fetchall()
+    doomed = []
+    for r in rows:
+        game_day = mathutils.parse_ts(
+            r["commence_time"]).astimezone(tz).date().isoformat()
+        if game_day > r["run_date"]:
+            doomed.append(r["id"])
+    for bet_id in doomed:
+        conn.execute("DELETE FROM bets WHERE id=?", (bet_id,))
+    return len(doomed)
 
 
 def _espn_context(sport, now, verbose):

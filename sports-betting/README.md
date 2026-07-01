@@ -92,11 +92,12 @@ Full Disk Access (System Settings → Privacy & Security) or keep the
 clone outside `~/Documents`/`~/Desktop`/`~/Downloads` (a plain `~/`
 clone works without any changes).
 
-The app never bets a game that has already started: the slate is
-strictly games starting after the run. A 9:30 AM run is ahead of NFL
-Sunday's 10:00 AM PT window and standard MLB day games, so the full
-day's slates are bettable; the rare earlier start (e.g. a 9:00 AM PT
-tournament tip) is analyzed for learning only, never bet.
+The slate is **today only**: games starting after the run on the same
+local calendar day. Games already underway are never bet, and tomorrow's
+games wait for tomorrow's run (when their lines are sharper anyway). A
+9:30 AM run is ahead of NFL Sunday's 10:00 AM PT window and standard MLB
+day games, so the full day is bettable; the rare earlier start (e.g. a
+9:00 AM PT tournament tip) is analyzed for learning only, never bet.
 
 ## All commands
 

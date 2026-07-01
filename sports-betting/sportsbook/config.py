@@ -75,10 +75,8 @@ SPORTS = {
 BETS_PER_DAY = int(os.environ.get("SPORTSBOOK_BETS_PER_DAY", "10"))
 STARTING_BANKROLL = float(os.environ.get("SPORTSBOOK_BANKROLL", "10000"))
 
-# A game's slate window: bet on games starting within this many hours of the run.
-SLATE_HOURS = int(os.environ.get("SPORTSBOOK_SLATE_HOURS", "24"))
-
-# Local timezone for "the betting day" (report naming, day boundaries).
+# Local timezone for "the betting day": the slate is games starting later
+# this local calendar day, and reports/day boundaries use it too.
 TIMEZONE = os.environ.get("SPORTSBOOK_TZ", "America/Los_Angeles")
 
 # `bet.py daily` does real work only at/after this local time (HH:MM), and

@@ -7,6 +7,7 @@ credits, so a 3-market FanDuel pull is 3 credits per sport per day —
 
 import datetime as dt
 import json
+import zoneinfo
 
 from . import config, http, mathutils
 
@@ -136,15 +137,19 @@ def fetch_scores(sport, days_from=2):
 
 
 def slate_filter(rows, now=None):
-    """Keep games starting strictly after now, within SLATE_HOURS.
+    """Keep games starting strictly after now on the SAME local calendar
+    day as the run — the app bets only today's slate.
 
-    The odds feed includes live and just-started games — those must never
-    be analyzed for betting (no betting on games already underway)."""
+    Strictly after now: the odds feed includes live and just-started
+    games, which must never be analyzed for betting. Same local day: a
+    morning run must not reach into tomorrow's games even though they
+    fall within 24 hours."""
     now = now or dt.datetime.now(dt.timezone.utc)
-    horizon = now + dt.timedelta(hours=config.SLATE_HOURS)
+    tz = zoneinfo.ZoneInfo(config.TIMEZONE)
+    today = now.astimezone(tz).date()
     out = []
     for r in rows:
         start = mathutils.parse_ts(r["commence_time"])
-        if now < start <= horizon:
+        if start > now and start.astimezone(tz).date() == today:
             out.append(r)
     return out

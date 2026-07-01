@@ -83,17 +83,21 @@ class TestMath(unittest.TestCase):
 
 
 class TestSlateFilter(unittest.TestCase):
-    def test_started_and_distant_games_are_excluded(self):
+    def test_only_upcoming_same_local_day_games(self):
+        # NOW is 2026-06-30 16:00 UTC == 9 AM Pacific June 30
         from sportsbook import odds
         rows = [
             {"commence_time": "2026-06-30T14:00:00Z"},  # started 2h ago
             {"commence_time": "2026-06-30T16:00:00Z"},  # first pitch right now
-            {"commence_time": "2026-06-30T23:00:00Z"},  # tonight -> keep
-            {"commence_time": "2026-07-02T01:00:00Z"},  # beyond 24h window
+            {"commence_time": "2026-06-30T23:00:00Z"},  # 4 PM PT today -> keep
+            {"commence_time": "2026-07-01T04:30:00Z"},  # 9:30 PM PT today -> keep
+            {"commence_time": "2026-07-01T17:00:00Z"},  # 10 AM PT TOMORROW:
+                                                        # inside 24h, wrong day
+            {"commence_time": "2026-07-02T01:00:00Z"},  # tomorrow evening
         ]
         kept = odds.slate_filter(rows, now=NOW)
         self.assertEqual([r["commence_time"] for r in kept],
-                         ["2026-06-30T23:00:00Z"])
+                         ["2026-06-30T23:00:00Z", "2026-07-01T04:30:00Z"])
 
 
 class TestOddsClient(unittest.TestCase):
@@ -141,6 +145,32 @@ class DBTestCase(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         for p in self._patches:
             self.addCleanup(p.stop)
+
+
+class TestFutureDayBetCleanup(DBTestCase):
+    def test_pending_bets_on_later_day_games_are_dropped(self):
+        from sportsbook import pipeline
+        with db.session() as conn:
+            # 4 PM PT June 30 game, bet on run_date June 30: legit, stays
+            g_today = db.upsert_game(conn, "MLB", odds_id="t1",
+                                     commence_time="2026-06-30T23:00:00Z",
+                                     home_team="H1", away_team="A1")
+            # 10 AM PT July 1 game, bet on run_date June 30: violates the
+            # bets-only-today rule (placed under the old 24h window)
+            g_tmrw = db.upsert_game(conn, "MLB", odds_id="t2",
+                                    commence_time="2026-07-01T17:00:00Z",
+                                    home_team="H2", away_team="A2")
+            for gid in (g_today, g_tmrw):
+                conn.execute(
+                    """INSERT INTO bets (run_date, sport, game_id, market,
+                           selection, line, price, win_prob, edge,
+                           confidence, stake)
+                       VALUES ('2026-06-30','MLB',?,?,'H',-1.5,-110,
+                               0.55,0.05,50,50)""", (gid, "spread"))
+            dropped = pipeline._drop_future_day_bets(conn)
+            self.assertEqual(dropped, 1)
+            left = conn.execute("SELECT game_id FROM bets").fetchall()
+            self.assertEqual([r["game_id"] for r in left], [g_today])
 
 
 class TestDailyGate(DBTestCase):
