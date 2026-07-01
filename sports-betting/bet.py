@@ -133,7 +133,8 @@ def cmd_history():
     n = int(sys.argv[2]) if len(sys.argv) > 2 else 25
     with db.session() as conn:
         rows = conn.execute(
-            """SELECT b.*, g.home_team, g.away_team
+            """SELECT b.*, g.home_team, g.away_team, g.home_score,
+                      g.away_score, g.completed
                FROM bets b JOIN games g ON g.id = b.game_id
                WHERE b.status != 'pending'
                ORDER BY b.settled_at DESC, b.id DESC LIMIT ?""",
@@ -146,7 +147,11 @@ def cmd_history():
         for b in reversed(rows):  # oldest first, running P/L reads naturally
             running += b["profit"]
             desc = f"{report.bet_desc(b)} ({b['price']:+d})"
-            matchup = f"{b['away_team']} @ {b['home_team']}"
+            if b["completed"] and b["home_score"] is not None:
+                matchup = (f"{b['away_team']} {b['away_score']} @ "
+                           f"{b['home_team']} {b['home_score']}")
+            else:
+                matchup = f"{b['away_team']} @ {b['home_team']} (no result)"
             print(f"  {dim(b['run_date'])}  {b['sport']:<6}"
                   f"{bold(f'{desc:<32}')} ${b['stake']:>3.0f}  "
                   f"{colored_status(b['status'])} {money(b['profit'], '+8.2f')}"
