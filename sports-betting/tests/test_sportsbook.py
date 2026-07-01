@@ -98,16 +98,30 @@ class TestSlateFilter(unittest.TestCase):
 
 class TestOddsClient(unittest.TestCase):
     def test_network_errors_never_leak_the_api_key(self):
+        # exercise the REAL transport wrapper: urlopen raising a URLError
+        # whose message contains the full URL (apiKey included) must come
+        # out of odds._get as an OddsAPIError without the key
+        import urllib.error
         from sportsbook import odds
-        import requests as _requests
         secret = "sekrit-key-12345"
-        err = _requests.ConnectionError(
-            f"HTTPSConnectionPool: /v4/sports?apiKey={secret} refused")
+        err = urllib.error.URLError(
+            f"<urlopen error /v4/sports?apiKey={secret} refused>")
         with mock.patch.object(odds.config, "ODDS_API_KEY", secret), \
-             mock.patch("sportsbook.odds.requests.get", side_effect=err):
+             mock.patch("urllib.request.urlopen", side_effect=err):
             with self.assertRaises(odds.OddsAPIError) as ctx:
                 odds._get("/sports/baseball_mlb/odds")
             self.assertNotIn(secret, str(ctx.exception))
+
+    def test_stdlib_only(self):
+        # the app must run under a bare system python3 (cron has no pip
+        # packages): nothing in sportsbook may import third-party modules
+        import pathlib
+        import sportsbook
+        pkg = pathlib.Path(sportsbook.__file__).parent
+        for f in pkg.rglob("*.py"):
+            src = f.read_text()
+            self.assertNotIn("import requests", src,
+                             f"{f.name} imports requests")
 
 
 class DBTestCase(unittest.TestCase):

@@ -13,9 +13,9 @@ groups=50 (configured per sport in config.SPORTS) is required for men's
 college basketball to return all of D1 instead of just the top-25 slate.
 """
 
-import requests
+import json
 
-from . import config
+from . import config, http
 
 BASE = "https://site.api.espn.com/apis/site/v2/sports"
 
@@ -80,10 +80,10 @@ def fetch_scoreboard(sport, yyyymmdd):
     sp, league = config.SPORTS[sport]["espn"]
     params = {"dates": yyyymmdd, "limit": 500}
     params.update(config.SPORTS[sport].get("espn_params", {}))
-    resp = requests.get(f"{BASE}/{sp}/{league}/scoreboard", params=params,
-                        timeout=30)
-    resp.raise_for_status()
-    data = resp.json()
+    status, body = http.get(f"{BASE}/{sp}/{league}/scoreboard", params=params)
+    if status != 200:
+        raise RuntimeError(f"ESPN scoreboard {sport} {yyyymmdd} -> {status}")
+    data = json.loads(body)
 
     out = []
     for event in data.get("events", []):

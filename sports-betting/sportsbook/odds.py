@@ -6,10 +6,9 @@ credits, so a 3-market FanDuel pull is 3 credits per sport per day —
 """
 
 import datetime as dt
+import json
 
-import requests
-
-from . import config, mathutils
+from . import config, http, mathutils
 
 
 class OddsAPIError(RuntimeError):
@@ -25,18 +24,16 @@ def _get(path, **params):
             "and export ODDS_API_KEY=... before running.")
     params["apiKey"] = config.ODDS_API_KEY
     try:
-        resp = requests.get(f"{config.ODDS_API_BASE}{path}", params=params,
-                            timeout=30)
-    except requests.RequestException as exc:
-        # requests embeds the full URL — apiKey query param included — in
-        # its exception text; never let that reach logs
-        raise OddsAPIError(
-            f"Odds API {path} network error: {type(exc).__name__}") from None
-    if resp.status_code != 200:
-        raise OddsAPIError(
-            f"Odds API {path} -> {resp.status_code}: {resp.text[:300]}",
-            status=resp.status_code)
-    return resp.json()
+        status, body = http.get(f"{config.ODDS_API_BASE}{path}",
+                                params=params)
+    except http.NetworkError as exc:
+        # http.NetworkError carries only the exception type — never the
+        # URL, whose query string holds the apiKey
+        raise OddsAPIError(f"Odds API {path} network error: {exc}") from None
+    if status != 200:
+        raise OddsAPIError(f"Odds API {path} -> {status}: {body[:300]}",
+                           status=status)
+    return json.loads(body)
 
 
 def _get_or(path, out_of_season_value, **params):
@@ -57,7 +54,7 @@ def fetch_active_sport_keys():
     the lookup fails, meaning 'unknown — just try them all'."""
     try:
         sports = _get("/sports")
-    except (OddsAPIError, requests.RequestException):
+    except OddsAPIError:
         return None
     return {s["key"] for s in sports if s.get("active")}
 

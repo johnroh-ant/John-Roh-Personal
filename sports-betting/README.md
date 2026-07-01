@@ -36,8 +36,10 @@ only to you.
 
 ## Setup
 
+Nothing to install — standard-library Python 3.9+ only, so the app runs
+under any `python3` (including the bare system one cron uses).
+
 ```bash
-pip install requests                          # the only dependency
 echo 'ODDS_API_KEY=yourkey' > .env            # free key from https://the-odds-api.com
 ```
 
