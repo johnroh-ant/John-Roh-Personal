@@ -55,6 +55,28 @@ every 15 s (from 45 s) whenever a bus is within 12 minutes or its pings have
 gone silent, and the Pusher socket uses tight activity timeouts so a dead
 connection is detected within seconds.
 
+Stability rules derived from recorded field GPS traces (July 2026):
+
+- **Trip-match hysteresis** — a bus ~half a headway late scores almost the
+  same as "early on the next trip"; the matched trip is kept until a
+  challenger wins decisively, so the early/late reading can't flip-flop.
+- **Pre-start clamp** — a bus deadheading toward the terminal before its
+  trip's departure can't be read as "running early"; predictions never beat
+  the published time of a trip that hasn't started.
+- **Self-crossing continuity** — the route crosses itself at Fremont &
+  Howard ~6 scheduled minutes apart; projection follows the passage
+  consistent with the bus's recent motion rather than whichever line is
+  momentarily nearest, and re-anchors when the bus genuinely jumps (late
+  buses sometimes shortcut from Fremont straight onto Howard, skipping the
+  Financial District sub-loop).
+
+The drawn route was verified against those traces: buses follow it within
+~100 m over the full loop (the larger excursions in the data are pre-service
+deadheading and the discretionary Fremont→Howard shortcut above).
+`CONFIG.geometryPatches` in `tracker.js` can splice corrected street
+geometry into the drawn line if the TMA ever changes routing without
+updating Trakk.
+
 The API allows cross-origin requests (`Access-Control-Allow-Origin: *`),
 so the page is fully static — no server or build step.
 
