@@ -173,6 +173,49 @@ class TestFutureDayBetCleanup(DBTestCase):
             self.assertEqual([r["game_id"] for r in left], [g_today])
 
 
+class TestPostponedGamesVoidImmediately(DBTestCase):
+    def test_espn_postponed_status_voids_bets_now(self):
+        from sportsbook import settle
+        with db.session() as conn:
+            gid = db.upsert_game(conn, "MLB", odds_id="ppd1",
+                                 commence_time="2026-06-29T22:40:00Z",
+                                 home_team="Pittsburgh Pirates",
+                                 away_team="Milwaukee Brewers")
+            conn.execute(
+                """INSERT INTO bets (run_date, sport, game_id, market,
+                       selection, line, price, win_prob, edge, confidence,
+                       stake)
+                   VALUES ('2026-06-29','MLB',?,'total','Over',8.5,-110,
+                           0.55,0.05,50,50)""", (gid,))
+
+        rained_out = [{
+            "espn_id": "e-ppd", "season_type": 2,
+            "commence_time": "2026-06-29T22:40:00Z",
+            "home_team": "Pittsburgh Pirates",
+            "away_team": "Milwaukee Brewers",
+            "neutral_site": False, "completed": False,
+            "status": "STATUS_POSTPONED", "periods": None,
+            "home_score": None, "away_score": None,
+            "home_pitcher": None, "away_pitcher": None,
+        }]
+        with db.session() as conn, \
+             mock.patch("sportsbook.espn.fetch_scoreboard",
+                        return_value=rained_out), \
+             mock.patch("sportsbook.odds.fetch_scores", return_value={}):
+            results = settle.settle(conn, now=NOW, verbose=lambda *a: None)
+            self.assertEqual(results["voided"], 1)
+            bet = conn.execute("SELECT * FROM bets").fetchone()
+            self.assertEqual(bet["status"], "void")
+            self.assertEqual(bet["profit"], 0.0)
+            # a mere delay must NOT void: reset and check
+            conn.execute("UPDATE bets SET status='pending', settled_at=NULL")
+            rained_out[0]["status"] = "STATUS_DELAYED"
+            results = settle.settle(conn, now=NOW, verbose=lambda *a: None)
+            self.assertEqual(results["voided"], 0)
+            self.assertEqual(conn.execute(
+                "SELECT status FROM bets").fetchone()["status"], "pending")
+
+
 class TestDailyGate(DBTestCase):
     """`bet.py daily` runs once per day, at/after RUN_AFTER local time."""
 

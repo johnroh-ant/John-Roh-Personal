@@ -9,8 +9,10 @@ Grading rules:
   spread     selection's score + line vs opponent: more = win, equal = push
   total      over/under vs the line, exactly on it = push
   moneyline  selection won = win; a tie (possible in NFL) refunds the stake
-  void       games postponed/cancelled (no result within VOID_AFTER_DAYS),
-             and markets FanDuel voids on shortened finals (a model's
+  void       stake refunded (a push, in effect): games ESPN marks
+             postponed/canceled void immediately; games with no result
+             within VOID_AFTER_DAYS void as a backstop; and markets
+             FanDuel voids on shortened finals (a model's
              FULL_GAME_PERIODS declares what a full game is — in MLB a
              rain-shortened final keeps the moneyline, voids the run line,
              and keeps totals only when already unequivocally over)
@@ -22,8 +24,15 @@ import json
 from . import config, db, espn, mathutils, odds
 from .models import MODELS
 
-VOID_AFTER_DAYS = 3   # pending this long with no score -> postponed, refund
+VOID_AFTER_DAYS = 3   # pending this long with no score -> assume dead, refund
 LIKELY_OVER_HOURS = 4 # only look for scores once a game should be finished
+
+# ESPN statuses meaning the game will NOT produce a result today: bets are
+# refunded immediately (FanDuel voids postponed/canceled games). Mere
+# delays and suspensions are NOT here — those games usually still finish,
+# so their bets ride until a final arrives or the stale rule refunds them.
+ABANDONED_STATUSES = {"STATUS_POSTPONED", "STATUS_CANCELED",
+                      "STATUS_CANCELLED", "STATUS_FORFEIT"}
 
 
 def settle(conn, now=None, verbose=print):
@@ -44,7 +53,7 @@ def settle(conn, now=None, verbose=print):
         if not pending:
             continue
 
-        _fill_scores_from_espn(conn, sport, pending, verbose)
+        _fill_scores_from_espn(conn, sport, pending, now, results, verbose)
         _fill_scores_from_odds_api(conn, sport, floor, verbose)
 
     _grade_bets(conn, now, results)
@@ -53,7 +62,7 @@ def settle(conn, now=None, verbose=print):
     return results
 
 
-def _fill_scores_from_espn(conn, sport, pending, verbose):
+def _fill_scores_from_espn(conn, sport, pending, now, results, verbose):
     # ESPN scoreboards are keyed by US calendar date; an evening US game has
     # a NEXT-day UTC commence date, so fetch both candidate dates per game.
     dates = set()
@@ -70,25 +79,10 @@ def _fill_scores_from_espn(conn, sport, pending, verbose):
     finals = [r for r in rows if r["completed"]
               and r["home_score"] is not None
               and r["away_score"] is not None]
+    abandoned = [r for r in rows if r.get("status") in ABANDONED_STATUSES]
 
     for g in pending:
-        start = mathutils.parse_ts(g["commence_time"])
-        best, best_gap = None, dt.timedelta(hours=6)
-        for row in finals:
-            if g["espn_id"] and row["espn_id"] == g["espn_id"]:
-                best = row
-                break
-            if not (espn.team_match(row["home_team"], g["home_team"]) and
-                    espn.team_match(row["away_team"], g["away_team"])):
-                continue
-            # closest start time wins — disambiguates MLB doubleheaders
-            try:
-                row_start = mathutils.parse_ts(row["commence_time"])
-            except (TypeError, ValueError):
-                continue
-            gap = abs(row_start - start)
-            if gap < best_gap:
-                best, best_gap = row, gap
+        best = _best_match(g, finals)
         if best:
             db.record_result(conn, g["id"], best["home_score"],
                              best["away_score"], best.get("periods"))
@@ -100,6 +94,47 @@ def _fill_scores_from_espn(conn, sport, pending, verbose):
                    WHERE id=?""",
                 (best["espn_id"], best.get("home_pitcher"),
                  best.get("away_pitcher"), g["id"]))
+            continue
+        # no final — but if ESPN says the game was postponed or canceled,
+        # refund its bets NOW instead of waiting out the 3-day stale rule
+        if _best_match(g, abandoned):
+            n = _void_pending_bets(conn, g["id"], now)
+            if n:
+                results["voided"] += n
+                verbose(f"  {g['away_team']} @ {g['home_team']} "
+                        f"postponed/canceled -> voided {n} bet(s), "
+                        f"stake refunded")
+
+
+def _best_match(g, rows):
+    """The scoreboard row for a pending game: exact espn_id if known,
+    otherwise team match with the closest start time (disambiguates MLB
+    doubleheaders)."""
+    start = mathutils.parse_ts(g["commence_time"])
+    best, best_gap = None, dt.timedelta(hours=6)
+    for row in rows:
+        if g["espn_id"] and row["espn_id"] == g["espn_id"]:
+            return row
+        if not (espn.team_match(row["home_team"], g["home_team"]) and
+                espn.team_match(row["away_team"], g["away_team"])):
+            continue
+        try:
+            row_start = mathutils.parse_ts(row["commence_time"])
+        except (TypeError, ValueError):
+            continue
+        gap = abs(row_start - start)
+        if gap < best_gap:
+            best, best_gap = row, gap
+    return best
+
+
+def _void_pending_bets(conn, game_id, now):
+    """Void (refund) every pending bet on a game. Returns how many."""
+    cur = conn.execute(
+        """UPDATE bets SET status='void', profit=0, settled_at=?
+           WHERE game_id=? AND status='pending'""",
+        (now.isoformat(), game_id))
+    return cur.rowcount
 
 
 def _fill_scores_from_odds_api(conn, sport, floor, verbose):
@@ -183,7 +218,7 @@ def _void_stale(conn, now, results):
         conn.execute(
             "UPDATE bets SET status='void', profit=0, settled_at=? WHERE id=?",
             (now.isoformat(), row["id"]))
-    results["voided"] = len(stale)
+    results["voided"] += len(stale)
 
 
 def learn_from_results(conn):

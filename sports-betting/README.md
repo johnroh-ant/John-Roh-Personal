@@ -120,8 +120,11 @@ day games, so the full day is bettable; the rare earlier start (e.g. a
 - **Out-of-season sports** simply contribute no games; today (June 30)
   only MLB has a slate, and the other three wake up automatically when
   their seasons start.
-- **Pushes and voids** return the stake. A game with no final score after
-  3 days (postponement) voids the bet.
+- **Pushes and voids** return the stake — a void counts like a push. A
+  game ESPN marks postponed or canceled (rainout) voids its bets on the
+  next run; a game with no result after 3 days voids as a backstop
+  (mere rain *delays* aren't voided — those games usually finish, so
+  the bets ride until a final arrives).
 - **Re-runs are idempotent** — running twice in a day won't double-bet.
 - The starting bankroll is $10,000 fake dollars (`SPORTSBOOK_BANKROLL`
   to change).

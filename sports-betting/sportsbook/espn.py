@@ -72,10 +72,11 @@ def fetch_scoreboard(sport, yyyymmdd):
 
     Returns a list of dicts:
       {espn_id, season_type, commence_time, home_team, away_team,
-       neutral_site, completed, periods, home_score, away_score,
+       neutral_site, completed, status, periods, home_score, away_score,
        home_pitcher, away_pitcher}
     Pitcher fields are probable starters (MLB only, pre-game) — None
-    elsewhere.
+    elsewhere. `status` is ESPN's status.type.name (STATUS_FINAL,
+    STATUS_POSTPONED, STATUS_CANCELED, ...).
     """
     sp, league = config.SPORTS[sport]["espn"]
     params = {"dates": yyyymmdd, "limit": 500}
@@ -105,6 +106,7 @@ def fetch_scoreboard(sport, yyyymmdd):
             "away_team": (away.get("team") or {}).get("displayName"),
             "neutral_site": bool(comp.get("neutralSite")),
             "completed": completed,
+            "status": (status.get("type") or {}).get("name"),
             "periods": period if completed else None,
             "home_score": _score_of(home) if completed else None,
             "away_score": _score_of(away) if completed else None,
