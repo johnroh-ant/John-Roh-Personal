@@ -61,13 +61,14 @@ def colored_status(status):
 
 
 def local_start(ts):
-    """'Tue 4:05 PM' in the configured timezone."""
+    """'Tue 7/14 4:05 PM' in the configured timezone."""
     try:
         t = mathutils.parse_ts(ts).astimezone(
             zoneinfo.ZoneInfo(config.TIMEZONE))
     except (TypeError, ValueError):
         return ""
-    return t.strftime("%a %I:%M %p").replace(" 0", " ")
+    return (f"{t.strftime('%a')} {t.month}/{t.day} "
+            + t.strftime("%I:%M %p").lstrip("0"))
 
 
 RULE = "─" * 64
@@ -119,13 +120,24 @@ def cmd_status():
             print(f"\n  {bold('PENDING')} "
                   f"{dim(f'({len(pending)} bets, ${total:,.0f} at risk)')}")
             print(dim("  " + RULE))
+            import datetime as _dt
+            now = _dt.datetime.now(_dt.timezone.utc)
             for b in pending:
                 desc = f"{report.bet_desc(b)} ({b['price']:+d})"
                 meta = (f"{b['away_team']} @ {b['home_team']}"
                         f" · {local_start(b['commence_time'])}")
+                try:
+                    overdue = mathutils.parse_ts(b["commence_time"]) < now
+                except (TypeError, ValueError):
+                    overdue = False
+                flag = ""
+                if overdue:
+                    # game started but no result recorded yet: settles on
+                    # the next run, or voids 3 days after start
+                    flag = "  " + yellow("⏳ awaiting result")
                 print(f"  ${b['stake']:>3.0f}  {dim('conf')} "
                       f"{b['confidence']:>3}  {b['sport']:<6} "
-                      f"{bold(f'{desc:<34}')} {dim(meta)}")
+                      f"{bold(f'{desc:<34}')} {dim(meta)}{flag}")
         print()
 
 

@@ -66,6 +66,11 @@ def run_daily(now=None, verbose=print):
                 verbose(f"   {sport}: out of season")
                 continue
             rows = odds.slate_filter(odds.fetch_fanduel_lines(sport), now=now)
+            # exhibitions (All-Star Games, Pro Bowl) are on the board at
+            # FanDuel but are not model-able competitive games — never
+            # analyze or bet them
+            rows = [r for r in rows
+                    if not espn.is_exhibition(r["home_team"], r["away_team"])]
             if not rows:
                 verbose(f"   {sport}: no games on the slate")
                 continue

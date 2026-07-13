@@ -475,6 +475,14 @@ def fake_lines(sport):
         "total": 8.5, "over_price": -110, "under_price": -110,
         "home_ml": 400, "away_ml": -600,  # juicy in-play price: still no bet
     })
+    rows.append({  # tonight's All-Star Game: exhibitions are never bet
+        "odds_id": "asg", "commence_time": "2026-06-30T23:30:00Z",
+        "home_team": "National League", "away_team": "American League",
+        "home_spread": -1.5, "home_spread_price": 130,
+        "away_spread_price": -156,
+        "total": 8.5, "over_price": -110, "under_price": -110,
+        "home_ml": -120, "away_ml": 100,
+    })
     return rows
 
 
@@ -516,17 +524,17 @@ class TestEndToEnd(DBTestCase):
 
         self.assertEqual(len(result["analyses"]), 12)   # every game analyzed
         self.assertEqual(len(result["card"]), 10)        # exactly 10 bets
-        # the in-progress game was neither analyzed nor bet, despite its
-        # tempting in-play price
+        # neither the in-progress game (tempting in-play price) nor the
+        # same-day All-Star exhibition was analyzed or bet
         with db.session() as conn:
-            started = conn.execute(
+            bad = conn.execute(
                 """SELECT COUNT(*) c FROM games g
                    LEFT JOIN predictions p ON p.game_id = g.id
                    LEFT JOIN bets b ON b.game_id = g.id
-                   WHERE g.home_team='Started Host'
+                   WHERE g.home_team IN ('Started Host', 'National League')
                    AND (p.id IS NOT NULL OR b.id IS NOT NULL)"""
             ).fetchone()["c"]
-            self.assertEqual(started, 0)
+            self.assertEqual(bad, 0)
         for bet in result["card"]:
             self.assertEqual(bet["stake"], float(bet["confidence"]))
             self.assertGreaterEqual(bet["confidence"], 1)
