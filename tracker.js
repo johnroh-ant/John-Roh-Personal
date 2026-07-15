@@ -43,7 +43,10 @@
     parkedSpeedMps: 1.5,     // below this a bus is treated as holding in place
     anchorRadiusMeters: 250, // "at a loop anchor" radius for staged/holding buses
     stagedGraceSec: 300,     // parked this long past a departure = waiting for the next one
-    passedStopGraceMeters: 300, // projected just past the stop still counts as arriving
+    passedStopGraceMeters: 120, // projected just past the stop still counts as arriving:
+                                // covers the measured drawn-vs-real projection overshoot
+                                // (<= ~100 m in the 2026-07 field traces); farther past
+                                // means the bus is genuinely gone (~20 s of driving)
     passedStopGraceSec: 180,    // ...while the schedule agrees within this window
     reachabilityFactor: 0.8, // schedule padding tolerance for loop-around arrivals
     garageMeters: 1500,      // beyond this from the route, a fix predicts nothing
@@ -514,15 +517,23 @@
       var tau = tripTau(trip, model, fix.routeDist);
       if (!tau) return;
       var delay = busSec - tau.tauSec;
-      var cand = { trip: trip, tau: tau, delay: delay };
+      // A trip already underway is a more plausible explanation than one
+      // that hasn't started: a bus just past a stop, slightly late on its
+      // own trip, projects almost identically to "slightly early" on the
+      // next trip — and picking the future trip resurrects the departed
+      // bus as "arriving in 5 min". Penalize pre-start candidates by the
+      // hysteresis margin so started trips win near-ties even on a cold
+      // start (no per-bus memory yet).
+      var score = Math.abs(delay) + (busSec >= trip.startMin * 60 ? 0 : CONFIG.tripMatch.stickySec);
+      var cand = { trip: trip, tau: tau, delay: delay, score: score };
       if (trip.startMin === prevTripStartMin) prevMatch = cand;
-      if (!best || Math.abs(delay) < Math.abs(best.delay)) best = cand;
+      if (!best || score < best.score) best = cand;
     });
     // Hysteresis: keep the trip this bus was already matched to unless the
-    // challenger is decisively better.
+    // challenger is decisively better (same scoring as the selection above).
     if (prevMatch && best !== prevMatch &&
         Math.abs(prevMatch.delay) <= CONFIG.tripMatch.maxDelaySec &&
-        Math.abs(prevMatch.delay) <= Math.abs(best.delay) + CONFIG.tripMatch.stickySec) {
+        prevMatch.score <= best.score + CONFIG.tripMatch.stickySec) {
       best = prevMatch;
     }
 
@@ -558,7 +569,8 @@
       // known position instead, which also means the bus reads later, not
       // earlier, until real forward progress shows up.
       var tauSec = best.tau.tauSec;
-      if (busSec < trip.startMin * 60) {
+      var preStart = busSec < trip.startMin * 60;
+      if (preStart) {
         // pre-start, the projection is deadhead/staging noise, not trip
         // progress — the honest trip position is the start itself
         tauSec = trip.startMin * 60;
@@ -573,7 +585,7 @@
       // delay is kept for the grace test below, which measures whether the
       // projection AGREES with the schedule — clamping there would break
       // the agreement measure for every pre-start bus.
-      var delay = (rawDelay < 0 && busSec < trip.startMin * 60) ? 0 : rawDelay;
+      var delay = (rawDelay < 0 && preStart) ? 0 : rawDelay;
       var schedResult = function (arrivalSec) {
         return {
           arrivalSec: arrivalSec, delaySec: delay, method: 'schedule',
@@ -591,8 +603,12 @@
       // The drawn polyline simplifies some blocks, so a bus still approaching
       // the stop can project just past it. Hold the arrival while the
       // projection is within the grace zone and the schedule agreed at fix
-      // time.
-      if (tEntry) {
+      // time. The zone is sized to the measured projection error, so a bus
+      // beyond it has genuinely departed; and a trip that hasn't started
+      // cannot have served the stop, so its "agreement" would be fictional
+      // — without that gate a departed bus re-matched onto the next trip is
+      // resurrected as "arriving in 5 min".
+      if (tEntry && !preStart) {
         var pastBy = mod(fix.routeDist - tEntry.routeDist, L);
         if (pastBy < CONFIG.passedStopGraceMeters &&
             Math.abs(busSec - (tEntry.min * 60 + rawDelay)) < CONFIG.passedStopGraceSec) {
