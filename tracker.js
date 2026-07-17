@@ -50,8 +50,13 @@
     passedStopGraceSec: 180,    // ...while the schedule agrees within this window
     reachabilityFactor: 0.8, // schedule padding tolerance for loop-around arrivals
     garageMeters: 1500,      // beyond this from the route, a fix predicts nothing
-    reanchorMeters: 60,      // a passage this close may claim a fix whose
-                             // continuity pick is off-route (see locateBus)
+    fitPerMeterSec: 0.6,     // exchange rate between distance and schedule-fit
+                             // evidence when resolving an ambiguous passage: a
+                             // meter closer is worth this many seconds of fit
+    regressMeters: 25,       // backward motion along the locked passage beyond
+                             // GPS jitter counts toward the wrong-passage unlock
+    regressUnlockCount: 3,   // consecutive regressing fixes that break the lock
+                             // (~30-45 s at typical ping cadence)
     tripMatch: {
       windowBeforeSec: 15 * 60, // how early a trip is considered active (must not
                                 // exceed maxDelaySec or staged buses fall in a gap)
@@ -346,16 +351,60 @@
   }
 
   /*
-   * Locate a bus along the loop. `prev` is the bus's previous fix
-   * ({routeDist, when}) used to keep the projection moving forward when the
-   * route doubles back on the same street.
+   * Match a route position against the timetable: the best-fitting active
+   * trip by |delay|, with pre-start candidates penalized by the hysteresis
+   * margin — a trip already underway is a more plausible explanation than
+   * one that hasn't started (a bus just past a stop, slightly late on its
+   * own trip, projects almost identically to "slightly early" on the next
+   * trip, and picking the future trip resurrects departed buses).
    */
-  function locateBus(model, bus, prev) {
+  function matchTrips(model, trips, routeDist, busSec, prevTripStartMin) {
+    var best = null, prevMatch = null;
+    (trips || []).forEach(function (trip) {
+      var winLo = trip.startMin * 60 - CONFIG.tripMatch.windowBeforeSec;
+      var winHi = trip.endMin * 60 + CONFIG.tripMatch.windowAfterSec;
+      if (busSec < winLo || busSec > winHi) return;
+      var tau = tripTau(trip, model, routeDist);
+      if (!tau) return;
+      var delay = busSec - tau.tauSec;
+      var score = Math.abs(delay) + (busSec >= trip.startMin * 60 ? 0 : CONFIG.tripMatch.stickySec);
+      var cand = { trip: trip, tau: tau, delay: delay, score: score };
+      if (trip.startMin === prevTripStartMin) prevMatch = cand;
+      if (!best || score < best.score) best = cand;
+    });
+    return { best: best, prevMatch: prevMatch };
+  }
+
+  // How well a route position agrees with the timetable right now — capped
+  // so hopeless positions compare on distance alone.
+  function tripFitSec(model, trips, routeDist, busSec) {
+    if (!trips || !trips.length || typeof busSec !== 'number') return 0;
+    var m = matchTrips(model, trips, routeDist, busSec);
+    return m.best ? Math.min(m.best.score, CONFIG.tripMatch.maxDelaySec) : CONFIG.tripMatch.maxDelaySec;
+  }
+
+  /*
+   * Locate a bus on the loop. Continuity follows the passage consistent
+   * with the previous fix; a fix with no usable history (cold start, stale
+   * prev, or a persistent-regression unlock) is resolved jointly: among
+   * the distance-plausible passages, the one whose schedule fit is best
+   * wins — in the Mission Bay corridor the outbound approach and the
+   * return legs run within ~40 m of each other while sitting ~25 scheduled
+   * minutes apart, so nearest-line-wins routinely teleports an arriving
+   * bus half a loop ahead.
+   */
+  function locateBus(model, bus, prev, trips, busSec) {
     var cands = projectCandidates(model.path, toXY(bus.lat, bus.lng));
     if (!cands.length) return null;
+    var L = model.path.length;
     var pick = null;
-    var reanchor = false;
-    if (prev && bus.when && prev.when && bus.when - prev.when < 240000) {
+    var regressCount = 0;
+    // A bus that keeps moving BACKWARD along its locked passage is really
+    // driving forward along another one (real buses never reverse around
+    // the loop) — treat the lock as broken and re-resolve from scratch.
+    var usablePrev = prev && bus.when && prev.when && bus.when - prev.when < 240000 &&
+      !(prev.regressCount >= CONFIG.regressUnlockCount);
+    if (usablePrev) {
       var maxAdvance = CONFIG.maxSpeedMps * Math.max(0, (bus.when - prev.when) / 1000) + 250;
       var best = Infinity;
       cands.forEach(function (c) {
@@ -363,30 +412,54 @@
         // Fremont & Howard) the bus hugs the other passage's line, and
         // dropping the farther-but-continuous candidate flips the
         // projection ±minutes on every ping at the crossing
-        var fwd = mod(c.routeDist - prev.routeDist + 120, model.path.length) - 120;
+        var fwd = mod(c.routeDist - prev.routeDist + 120, L) - 120;
         if (fwd >= -120 && fwd <= maxAdvance && Math.abs(fwd) < best) {
           best = Math.abs(fwd); pick = c;
         }
       });
-      // Continuity is a tiebreaker, not a straitjacket. The primary escape
-      // from a stale passage is the pick=null fallthrough below (a genuine
-      // jump fails every candidate's fwd window once the old passage leaves
-      // the candidate set); this guard covers the remaining sliver where
-      // the stale passage lingers in range while another passage clearly
-      // explains the fix. Two consecutive confirming fixes are required so
-      // a single noisy ping near a crossing can't flip the passage.
-      reanchor = pick && pick !== cands[0] &&
-        Math.sqrt(pick.d2) > CONFIG.offRouteMeters && Math.sqrt(cands[0].d2) < CONFIG.reanchorMeters;
-      if (reanchor && prev.reanchor) pick = cands[0];
+      if (pick) {
+        if (bus.when === prev.when) {
+          // same fix re-evaluated (render tick, mode switch): no new
+          // evidence either way — carry the count, don't wipe it
+          regressCount = prev.regressCount || 0;
+        } else {
+          var picked = mod(pick.routeDist - prev.routeDist + 120, L) - 120;
+          regressCount = picked < -CONFIG.regressMeters ? (prev.regressCount || 0) + 1
+            : picked > CONFIG.regressMeters ? 0            // clear forward progress
+              : (prev.regressCount || 0);                  // dwell: hold
+        }
+      }
     }
-    if (!pick) pick = cands[0];
+    if (!pick) {
+      // Joint resolution: the nearest passage wins by default — position is
+      // strong evidence — but another distance-plausible passage takes the
+      // fix when its schedule fit is DECISIVELY better (a bus mid-corridor
+      // whose nearest line implies being 25 minutes off-schedule while the
+      // line a few meters farther matches to the second). Comparable fits
+      // must never override distance: at the pinch points both passages
+      // often fit within seconds of each other.
+      var d0 = Math.sqrt(cands[0].d2);
+      var fit0 = tripFitSec(model, trips, cands[0].routeDist, busSec);
+      pick = cands[0];
+      var bestAdv = 0;
+      cands.forEach(function (c, i) {
+        if (i === 0) return;
+        var d = Math.sqrt(c.d2);
+        if (d > d0 * 2 + 30) return;
+        var adv = fit0 - tripFitSec(model, trips, c.routeDist, busSec) -
+          (d - d0) * CONFIG.fitPerMeterSec - CONFIG.tripMatch.stickySec;
+        if (adv > bestAdv) { bestAdv = adv; pick = c; }
+      });
+    }
     var offBy = Math.sqrt(pick.d2);
     return {
       routeDist: pick.routeDist,
       offRoute: offBy > CONFIG.offRouteMeters,
-      offBy: offBy
+      offBy: offBy,
+      regressCount: regressCount
     };
   }
+
 
   // Which leg (1..n-1) contains route distance d? Leg k spans
   // stops[k-1] -> stops[k] and its length is the stored legDist.
@@ -508,27 +581,9 @@
     // mod-wrap: a fix taken just before midnight viewed just after stays on
     // the previous evening instead of becoming second 0 of the new day.
     var busSec = mod(fixSecOfDay, 86400);
-    var best = null;
-    var prevMatch = null;
-    (trips || []).forEach(function (trip) {
-      var winLo = trip.startMin * 60 - CONFIG.tripMatch.windowBeforeSec;
-      var winHi = trip.endMin * 60 + CONFIG.tripMatch.windowAfterSec;
-      if (busSec < winLo || busSec > winHi) return;
-      var tau = tripTau(trip, model, fix.routeDist);
-      if (!tau) return;
-      var delay = busSec - tau.tauSec;
-      // A trip already underway is a more plausible explanation than one
-      // that hasn't started: a bus just past a stop, slightly late on its
-      // own trip, projects almost identically to "slightly early" on the
-      // next trip — and picking the future trip resurrects the departed
-      // bus as "arriving in 5 min". Penalize pre-start candidates by the
-      // hysteresis margin so started trips win near-ties even on a cold
-      // start (no per-bus memory yet).
-      var score = Math.abs(delay) + (busSec >= trip.startMin * 60 ? 0 : CONFIG.tripMatch.stickySec);
-      var cand = { trip: trip, tau: tau, delay: delay, score: score };
-      if (trip.startMin === prevTripStartMin) prevMatch = cand;
-      if (!best || score < best.score) best = cand;
-    });
+    var matched = matchTrips(model, trips, fix.routeDist, busSec, prevTripStartMin);
+    var best = matched.best;
+    var prevMatch = matched.prevMatch;
     // Hysteresis: keep the trip this bus was already matched to unless the
     // challenger is decisively better (same scoring as the selection above).
     if (prevMatch && best !== prevMatch &&
@@ -680,14 +735,14 @@
       var status = busStatus(bus, now.getTime());
       if (status.dead) return;
       var prev = prevFixes && prevFixes[bus.id];
-      var fix = locateBus(model, bus, prev);
+      var fix = locateBus(model, bus, prev, trips, mod(nowSecOfDay - status.ageSec, 86400));
       if (!fix || fix.offBy > CONFIG.garageMeters) return; // garage/no-fix positions predict nothing
       var p = predictBus(model, trips, fix, bus, targetIdx, nowSecOfDay,
         nowSecOfDay - status.ageSec, prev);
       if (prevFixes) {
         prevFixes[bus.id] = {
           routeDist: fix.routeDist, when: bus.when,
-          reanchor: fix.reanchor,
+          regressCount: fix.regressCount,
           // keep the trip memory through transient non-matches (one noisy
           // ping must not disarm the hysteresis); the hysteresis gate
           // re-validates it against maxDelaySec every evaluation anyway
@@ -940,6 +995,8 @@
     locateBus: locateBus,
     legAt: legAt,
     etaSeconds: etaSeconds,
+    matchTrips: matchTrips,
+    tripFitSec: tripFitSec,
     buildTrips: buildTrips,
     tripTau: tripTau,
     predictBus: predictBus,

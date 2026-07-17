@@ -445,6 +445,60 @@ async function main() {
     console.log('  resurrect(+10s):', p2 && p2.etaMin + 'min arr ' + clockOf(p2.arrivalSec) + ' method ' + p2.method);
     check('receding bus reads as passed (next loop) within one ping', p2 && p2.method === 'next-trip' && p2.arrivalSec >= 9 * 3600, p2 && clockOf(p2.arrivalSec) + '/' + p2.method);
   }
+  console.log('\n=== FIELD BUG 2026-07-17: wrong-passage lock in the Mission Bay corridor ===');
+  // The outbound approach (Owens->Berry&King->Berry@MC, rd ~1500-2900) and
+  // the return legs (4th@Library->LongBridge, rd ~8200-9000) run within
+  // ~40 m of each other. An approaching bus that projects onto the return
+  // passage reads ~25 scheduled minutes ahead -> "passed your stop, 9:07".
+  {
+    // T1: cold open mid-corridor, fix nearer the WRONG (return) passage.
+    // Joint distance+schedule resolution must still pick the approach side.
+    // find the tightest pre-stop/return pinch with the approach side still
+    // BEFORE the stop, then stand the bus mid-corridor nearer the wrong side
+    let pinch = null;
+    for (let a = 2450; a < 2860; a += 20) for (let b = 8200; b < 9100; b += 20) {
+      const pa = T.toXY(pointAt(a).lat, pointAt(a).lng), pb = T.toXY(pointAt(b).lat, pointAt(b).lng);
+      const d = Math.hypot(pa.x - pb.x, pa.y - pb.y);
+      if (!pinch || d < pinch.d) pinch = { a, b, d };
+    }
+    check('corridor geometry still ambiguous (test precondition)', pinch && pinch.d < 130, pinch && Math.round(pinch.d) + 'm @' + pinch.a);
+    if (pinch && pinch.d < 130) {
+      const aPt = pointAt(pinch.a), bPt = pointAt(pinch.b);
+      const pos = { lat: 0.4 * aPt.lat + 0.6 * bPt.lat, lng: 0.4 * aPt.lng + 0.6 * bPt.lng };
+      const d = at('2026-06-29T08:40:30-07:00'); // 8:39 trip started, bus ~on time approaching
+      const p = T.predictions(model, trips, [mkBus(pos.lat, pos.lng, 6, d.getTime())], 'work', {}, d)[0];
+      console.log('  corridor-cold:', p && p.etaMin + 'min arr ' + clockOf(p.arrivalSec) + ' method ' + p.method + ' trip ' + T.fmtClock(p.tripStartMin));
+      check('approaching bus is not teleported to the return passage', p && p.method === 'schedule' && p.arrivalSec < 8 * 3600 + 50 * 60, p && clockOf(p.arrivalSec) + '/' + p.method);
+    }
+  }
+  {
+    // T2: the wrong-passage unlock, in browser reality. Synthetic rectangle
+    // loop with two antiparallel passages 40 m apart; the bus drives forward
+    // along the outbound side but starts locked onto the return side, so its
+    // return-projection regresses ~40 m per ping. Crucially, every ping is
+    // followed by a same-fix re-evaluation (the app's 15 s render tick) —
+    // the regression count must survive those or the unlock never fires.
+    const REF = 37.77, MLAT = 111320, MLNG = Math.cos(REF * Math.PI / 180) * MLAT;
+    const ll = (x, y) => ({ lat: REF + y / MLAT, lng: x / MLNG });
+    const rect = { path: T.buildPath([ll(0, 0), ll(2000, 0), ll(2000, 40), ll(0, 40), ll(0, 0)]) };
+    const retRd = x => 2040 + (2000 - x);
+    const t0 = 1750000000000;
+    let prev = { routeDist: retRd(500), when: t0 - 15000 };
+    let unlockedAt = -1;
+    for (let k = 0; k < 8; k++) {
+      const x = 500 + 40 * k;
+      const bus = { id: 's', name: 'S', lat: ll(x, 19).lat, lng: ll(x, 19).lng, speed: 6, when: t0 + k * 15000, showOnMap: true };
+      let fx = T.locateBus(rect, bus, prev, null, 30000);
+      prev = { routeDist: fx.routeDist, when: bus.when, regressCount: fx.regressCount };
+      // interleaved same-fix render (the part that used to wipe the counter)
+      fx = T.locateBus(rect, bus, prev, null, 30000);
+      prev = { routeDist: fx.routeDist, when: bus.when, regressCount: fx.regressCount };
+      if (unlockedAt < 0 && fx.routeDist < 2000) unlockedAt = k;
+    }
+    console.log('  corridor-unlock: correct passage from ping', unlockedAt);
+    check('wrong-passage lock breaks within ~5 pings despite render ticks', unlockedAt >= 0 && unlockedAt <= 5, 'ping ' + unlockedAt);
+  }
+
   console.log('\n' + (failures ? failures + ' FAILURES' : 'ALL CHECKS PASSED'));
   process.exit(failures ? 1 : 0);
 }

@@ -395,6 +395,17 @@
   function shortName(name) {
     return name.replace(' Financial', '').replace(' (Caltrain)', '').replace('MBBS @ ', '').replace(' Street 181', ' St');
   }
+  // hours-away arrivals read as clock time, not a 3-digit countdown
+  function setHeroTime(top) {
+    if (top.etaMin > 90) {
+      els.heroBig.textContent = fmtClockSec(top.arrivalSec);
+      els.heroBig.className = 'big dim';
+    } else {
+      els.heroBig.innerHTML = top.etaMin + '<small>min</small>';
+      els.heroBig.className = 'big';
+    }
+  }
+
   function renderSched(mins) {
     if (mins.length) {
       els.sched.style.display = 'flex';
@@ -461,7 +472,7 @@
           els.heroBig.textContent = 'Due';
           els.heroArrive.textContent = 'Bus ' + top.bus.name + ' should be there — awaiting GPS';
         } else {
-          els.heroBig.innerHTML = top.etaMin + '<small>min</small>';
+          setHeroTime(top);
           els.heroArrive.textContent = 'Bus ' + top.bus.name + ' · due ~' + fmtClockSec(top.arrivalSec) + ' · awaiting GPS';
         }
         els.heroBig.className = 'big dim';
@@ -474,14 +485,17 @@
           els.heroBig.textContent = 'Now';
           els.heroBig.className = 'big';
           els.heroArrive.textContent = 'Bus ' + top.bus.name + ' is arriving';
+          // the loop-around meters are meaningless mid-arrival ("5.9 mi
+          // away" under a giant "Now" reads as a glitch)
+          els.heroDetail.textContent = 'Pulling up at your stop — watch the map.';
         } else {
-          els.heroBig.innerHTML = top.etaMin + '<small>min</small>';
-          els.heroBig.className = 'big';
-          els.heroArrive.textContent = 'Bus ' + top.bus.name + ' · arrives ~' + fmtClockSec(top.arrivalSec);
+          setHeroTime(top);
+          els.heroArrive.textContent = top.etaMin > 90 ? 'Bus ' + top.bus.name
+            : 'Bus ' + top.bus.name + ' · arrives ~' + fmtClockSec(top.arrivalSec);
+          els.heroDetail.textContent = top.method === 'next-trip'
+            ? 'This bus already passed your stop — it comes around again next loop.'
+            : miles(top.meters) + ' mi away · between ' + shortName(top.legFrom) + ' and ' + shortName(top.legTo);
         }
-        els.heroDetail.textContent = top.method === 'next-trip'
-          ? 'This bus already passed your stop — it comes around again next loop.'
-          : miles(top.meters) + ' mi away · between ' + shortName(top.legFrom) + ' and ' + shortName(top.legTo);
       }
       // badges
       var badges = '';
