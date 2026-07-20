@@ -191,14 +191,16 @@ async function main() {
     }
   }
   {
-    // [19] bus that passed the rider's stop: next arrival must be physically reachable (loop-around), not the next timetable slot
+    // [19] bus that passed the rider's stop predicts its own comeback: drive
+    // to the next trip's anchor (timetable-paced), depart at max(start,
+    // arrival there), carry the lateness to the target's published time.
     const pos = pointAt(stopAt('Berry at Mission Creek').routeDist + 900);
     const d = at('2026-06-29T06:25:00-07:00');
     const preds = T.predictions(model, trips, [mkBus(pos.lat, pos.lng, 8, d.getTime())], 'work', {}, d);
     const p = preds[0];
-    const travel = T.etaSeconds(model, T.mod(stopAt('Berry at Mission Creek').routeDist + 900, model.path.length), T.findStopIndex(model, 'work'));
-    console.log('  loop-around:', p && clockOf(p.arrivalSec) + ' method ' + p.method, '| physical travel', (travel / 60).toFixed(0) + 'min');
-    check('passed-stop arrival is physically reachable', p && p.method === 'next-trip' && p.arrivalSec >= 6 * 3600 + 25 * 60 + 0.75 * travel, p && clockOf(p.arrivalSec));
+    console.log('  comeback:', p && clockOf(p.arrivalSec) + ' method ' + p.method + ' trip ' + T.fmtClock(p.tripStartMin));
+    check('passed-stop comeback lands on a plausible own-service slot',
+      p && p.method === 'next-trip' && p.arrivalSec >= 7 * 3600 && p.arrivalSec <= 7 * 3600 + 30 * 60, p && clockOf(p.arrivalSec));
   }
   {
     // [26] grace: bus projecting just past 500 Howard at its scheduled passing time is still "arriving", not next-loop
@@ -497,6 +499,52 @@ async function main() {
     }
     console.log('  corridor-unlock: correct passage from ping', unlockedAt);
     check('wrong-passage lock breaks within ~5 pings despite render ticks', unlockedAt >= 0 && unlockedAt <= 5, 'ping ' + unlockedAt);
+  }
+
+  console.log('\n=== FIELD BUG 2026-07-20: late comeback skipped to the next published slot ===');
+  {
+    // 8:44 AM, bus finishing its previous loop between Owens and Berry&King,
+    // running ~8 min behind. It reaches the anchor ~8:46 and serves the 8:41
+    // slot late, arriving Berry@MC ~8:49 — five minutes out. The published-
+    // floor logic skipped the already-printed 8:41 and reported 9:07.
+    const pos = pointAt(1600);
+    const d = at('2026-06-29T08:44:00-07:00');
+    const p = T.predictions(model, trips, [mkBus(pos.lat, pos.lng, 6, d.getTime())], 'work', {}, d)[0];
+    console.log('  late-comeback:', p && p.etaMin + 'min arr ' + clockOf(p.arrivalSec) + ' method ' + p.method + ' trip ' + T.fmtClock(p.tripStartMin));
+    check('late comeback predicts its own delayed service (~8:48), not 9:07',
+      p && p.arrivalSec >= 8 * 3600 + 45 * 60 && p.arrivalSec <= 8 * 3600 + 52 * 60,
+      p && clockOf(p.arrivalSec) + '/' + p.method);
+  }
+  {
+    // ...and a tail bus between printed slots reads earliest-plausible: at
+    // 8:33 it could be the 8:24 slot running ~11 late (arrive ~8:37) or hold
+    // for 8:39 (arrive 8:41). Earlier-is-safer — a rider told 8:41 misses a
+    // roll-through, one told 8:37 waits four minutes — and the staged rule
+    // corrects to the published time within a ping of the bus parking.
+    const pos = pointAt(1600);
+    const d = at('2026-06-29T08:33:00-07:00');
+    const p = T.predictions(model, trips, [mkBus(pos.lat, pos.lng, 6, d.getTime())], 'work', {}, d)[0];
+    console.log('  early-comeback:', p && p.etaMin + 'min arr ' + clockOf(p.arrivalSec) + ' method ' + p.method);
+    check('tail comeback reads earliest-plausible, never later than published',
+      p && p.arrivalSec >= 8 * 3600 + 35 * 60 && p.arrivalSec <= 8 * 3600 + 42 * 60 + 30,
+      p && clockOf(p.arrivalSec));
+  }
+
+  {
+    // Mid-loop comebacks must use timetable pace, not Trakk's padded leg
+    // durations (69 vs 54 min/loop): a bus just past Berry@MC at 8:35
+    // reaches the anchor ~9:26 by the printed timetable and serves the 9:29
+    // slot at ~9:31 — raw leg durations said 9:40+, and further round the
+    // loop pushed the real slot over the plausibility cap entirely.
+    const bmc = stopAt('Berry at Mission Creek');
+    const d1 = at('2026-06-29T08:35:00-07:00');
+    const p1 = T.predictions(model, trips, [mkBus(pointAt(bmc.routeDist + 250).lat, pointAt(bmc.routeDist + 250).lng, 7, d1.getTime())], 'work', {}, d1)[0];
+    console.log('  midloop-comeback:', p1 && clockOf(p1.arrivalSec) + ' trip ' + T.fmtClock(p1.tripStartMin));
+    check('mid-loop comeback stays near the printed 9:31 slot', p1 && p1.arrivalSec >= 9 * 3600 + 25 * 60 && p1.arrivalSec <= 9 * 3600 + 38 * 60, p1 && clockOf(p1.arrivalSec));
+    const d2 = at('2026-06-29T08:50:00-07:00');
+    const p2 = T.predictions(model, trips, [mkBus(pointAt(3400).lat, pointAt(3400).lng, 7, d2.getTime())], 'work', {}, d2)[0];
+    console.log('  midloop-comeback-late:', p2 && clockOf(p2.arrivalSec) + ' trip ' + T.fmtClock(p2.tripStartMin));
+    check('padding never pushes the real slot over the cap', p2 && p2.arrivalSec <= 9 * 3600 + 46 * 60, p2 && clockOf(p2.arrivalSec));
   }
 
   console.log('\n' + (failures ? failures + ' FAILURES' : 'ALL CHECKS PASSED'));

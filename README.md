@@ -63,6 +63,12 @@ Stability rules derived from recorded field GPS traces (July 2026):
 - **Pre-start clamp** — a bus deadheading toward the terminal before its
   trip's departure can't be read as "running early"; predictions never beat
   the published time of a trip that hasn't started.
+- **Comebacks are bus-centric** — a bus that passed your stop predicts its
+  own next service: drive (at timetable pace) to the next trip's first
+  stop, depart at max(published start, arrival there), and carry that
+  lateness to your stop. A bus running 8 minutes behind serves the "8:41"
+  slot at 8:49 — published times alone would skip that visit and report
+  the following one.
 - **Self-crossing continuity** — the route crosses itself at Fremont &
   Howard ~6 scheduled minutes apart; projection follows the passage
   consistent with the bus's recent motion rather than whichever line is

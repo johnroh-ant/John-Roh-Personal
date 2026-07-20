@@ -48,7 +48,6 @@
                                 // (<= ~100 m in the 2026-07 field traces); farther past
                                 // means the bus is genuinely gone (~20 s of driving)
     passedStopGraceSec: 180,    // ...while the schedule agrees within this window
-    reachabilityFactor: 0.8, // schedule padding tolerance for loop-around arrivals
     garageMeters: 1500,      // beyond this from the route, a fix predicts nothing
     fitPerMeterSec: 0.6,     // exchange rate between distance and schedule-fit
                              // evidence when resolving an ambiguous passage: a
@@ -64,7 +63,9 @@
                                 // (must cover maxDelaySec or a very late
                                 // bus's own trip drops out of the match set
                                 // and hysteresis releases at the worst time)
-      maxDelaySec: 20 * 60,     // beyond this the trip match is distrusted
+      maxDelaySec: 20 * 60,     // beyond this the trip match is distrusted;
+                                // also bounds how late a comeback bus can
+                                // still be running a slot (nextOwnArrival)
       stickySec: 150            // a challenger trip must beat the currently
                                 // matched one by this margin — a bus ~half a
                                 // headway late scores almost identically as
@@ -504,13 +505,11 @@
   function firstPublishedArrival(model, trips, targetIdx, secOfDay) {
     var best = null;
     for (var t = 0; t < trips.length; t++) {
-      for (var j = 0; j < trips[t].entries.length; j++) {
-        var e = trips[t].entries[j];
-        if (!sameStop(model, e.idx, targetIdx)) continue;
-        var sec = e.min * 60;
-        if (sec >= secOfDay && (!best || sec < best.arrivalSec)) {
-          best = { arrivalSec: sec, tripStartMin: trips[t].startMin };
-        }
+      var e = firstEntryFor(model, trips[t], targetIdx);
+      if (!e) continue;
+      var sec = e.min * 60;
+      if (sec >= secOfDay && (!best || sec < best.arrivalSec)) {
+        best = { arrivalSec: sec, tripStartMin: trips[t].startMin };
       }
     }
     return best;
@@ -558,6 +557,56 @@
     return staged ? { trip: staged, lateBy: Math.max(0, nowSecOfDay - staged.startMin * 60) } : null;
   }
 
+  // First timetable entry of a trip serving the target stop (entries are
+  // time-ordered, so the first match is the earliest visit).
+  function firstEntryFor(model, trip, targetIdx) {
+    for (var i = 0; i < trip.entries.length; i++) {
+      if (sameStop(model, trip.entries[i].idx, targetIdx)) return trip.entries[i];
+    }
+    return null;
+  }
+
+  /*
+   * The bus's own next service of the target after passing it: it drives on
+   * to a coming trip's first stop, departs at max(published start, when it
+   * physically gets there), and carries that lateness to the target's
+   * published time on that trip. Published times alone are not enough — a
+   * bus finishing its loop 8 minutes late serves the "8:41" slot at 8:49,
+   * and flooring on published times skips that visit entirely and reports
+   * the following one (the field bug: "passed your stop — 9:07" for a bus
+   * five minutes out).
+   */
+  function nextOwnArrival(model, trips, fix, busSec, targetIdx) {
+    var best = null;
+    (trips || []).forEach(function (t) {
+      var s0 = t.entries[0];
+      var last = t.entries[t.entries.length - 1];
+      if (!s0 || !last) return;
+      var tEntry = firstEntryFor(model, t, targetIdx);
+      if (!tEntry) return;
+      var anchorIdx = s0.idx === 0 ? model.stops.length - 1 : s0.idx;
+      var lastIdx = last.idx === 0 ? model.stops.length - 1 : last.idx;
+      // Trakk's per-leg durations run ~25% slower than the printed
+      // timetable (69 vs 54 minutes per loop), so raw drive times overshoot
+      // long comebacks by double-digit minutes and can push the bus's real
+      // slot over the plausibility cap. Scale by this trip's own printed
+      // span over its engine-leg span.
+      var engineSpan = etaSeconds(model, mod(s0.routeDist + 1, model.path.length), lastIdx);
+      var printedSpan = (t.endMin - t.startMin) * 60;
+      var pace = engineSpan > 0 ? Math.min(1.2, Math.max(0.5, printedSpan / engineSpan)) : 1;
+      var reach = busSec + etaSeconds(model, fix.routeDist, anchorIdx) * pace;
+      // maxDelaySec doubles as the comeback-slot window: beyond it the bus
+      // plausibly waits for the next departure instead of running this one
+      var lateBy = Math.max(0, reach - t.startMin * 60);
+      if (lateBy > CONFIG.tripMatch.maxDelaySec) return;
+      var arrival = tEntry.min * 60 + lateBy;
+      if (!best || arrival < best.arrivalSec) {
+        best = { arrivalSec: arrival, tripStartMin: t.startMin };
+      }
+    });
+    return best;
+  }
+
   /*
    * Schedule-adherence prediction for one bus.
    *
@@ -601,16 +650,15 @@
     if (!trusted || best.tau.entryIdx === 0) {
       var staged = stagedDeparture(model, trips, fix, bus, busSec);
       if (staged) {
-        for (var s = 0; s < staged.trip.entries.length; s++) {
-          if (sameStop(model, staged.trip.entries[s].idx, targetIdx)) {
-            return {
-              arrivalSec: staged.trip.entries[s].min * 60 + staged.lateBy,
-              delaySec: staged.lateBy,
-              method: 'schedule',
-              tripStartMin: staged.trip.startMin,
-              matchedTripStartMin: staged.trip.startMin
-            };
-          }
+        var stagedEntry = firstEntryFor(model, staged.trip, targetIdx);
+        if (stagedEntry) {
+          return {
+            arrivalSec: stagedEntry.min * 60 + staged.lateBy,
+            delaySec: staged.lateBy,
+            method: 'schedule',
+            tripStartMin: staged.trip.startMin,
+            matchedTripStartMin: staged.trip.startMin
+          };
         }
       }
     }
@@ -671,13 +719,11 @@
         }
       }
       // Bus genuinely passed the stop on this loop (per its fix-time
-      // position): its next visit is the first published time it can
-      // physically reach by driving around (published times in between are
-      // other vehicles' trips).
-      var travelSec = etaSeconds(model, fix.routeDist, targetIdx);
-      var next = firstPublishedArrival(model, trips, targetIdx,
-        Math.max(nowSecOfDay + 1, busSec + CONFIG.reachabilityFactor * travelSec));
-      if (next) return { arrivalSec: next.arrivalSec, delaySec: null, method: 'next-trip', tripStartMin: next.tripStartMin, matchedTripStartMin: trip.startMin, matchedTauSec: tauSec };
+      // position): predict its own comeback — drive to the next trip's
+      // anchor, depart at max(published start, arrival there), carry the
+      // lateness to the target.
+      var own = nextOwnArrival(model, trips, fix, busSec, targetIdx);
+      if (own) return { arrivalSec: Math.max(own.arrivalSec, nowSecOfDay), delaySec: null, method: 'next-trip', tripStartMin: own.tripStartMin, matchedTripStartMin: trip.startMin, matchedTauSec: tauSec };
       return null; // no more service to that stop today
     }
 
