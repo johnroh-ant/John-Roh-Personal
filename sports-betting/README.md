@@ -70,27 +70,50 @@ real results before the first bet.
 python3 bet.py run
 ```
 
-Schedule it for 9:30 AM Pacific every day. On a laptop that sleeps, use
-the sleep-proof form — cron silently skips jobs that fire while the
-machine is asleep, so instead cron pings `bet.py daily` every 20 minutes
-and the app itself runs exactly once per day, at the first moment at or
-after 9:30 that the laptop is awake:
+Schedule it for 9:30 AM Pacific every day. The app gates itself: the
+scheduler pings `bet.py daily` every 20 minutes, and the app does real
+work exactly once per day, at the first ping at/after 9:30 local
+(`SPORTSBOOK_RUN_AFTER` in `.env` to change). Guarded pings cost
+nothing and exit silently; manual `bet.py run`s count as the day's run.
+
+**On a Mac (laptop), use launchd — one command:**
+
+```bash
+sh setup-mac.sh
+```
+
+This installs a launchd agent (and removes any old cron entry). launchd
+matters on laptops because, unlike cron, a timer that was missed during
+sleep fires the moment the Mac wakes — so a laptop opened at 11:47
+catches up immediately — and the job holds the machine awake
+(`caffeinate`) while the run finishes. To also cover days you never
+open the laptop at all, add the daily auto-wake (plugged in, this makes
+the run fully unattended; on battery with the lid closed macOS may skip
+scheduled wakes):
+
+```bash
+sudo pmset repeat cancel
+sudo pmset repeat wakeorpoweron MTWRFSU 09:32:00
+```
+
+The wake is at 9:32 — deliberately AFTER the 9:30 gate — so the on-wake
+launchd tick runs immediately while the machine is still up. (A wake
+before 9:30 is useless: the gate rejects the tick, the Mac dozes off,
+and no later tick fires.)
+
+**On an always-on machine (Linux box, server, Mac mini)**, plain cron
+works fine:
 
 ```cron
 CRON_TZ=America/Los_Angeles
 */20 * * * *  cd ~/John-Roh-Personal/sports-betting && python3 bet.py daily >> run.log 2>&1
 ```
 
-The guarded pings cost nothing (no API calls, ~50ms) and exit silently.
-A machine that is always on at 9:30 can use `30 9 * * *` with `bet.py
-run` instead; both forms are safe to mix with manual `run`s — a manual
-morning run counts as that day's run. The schedule time is configurable
-via `SPORTSBOOK_RUN_AFTER` (default `09:30`) in `.env`.
-
-macOS note: if cron can't read the repo folder, either grant `cron`
-Full Disk Access (System Settings → Privacy & Security) or keep the
-clone outside `~/Documents`/`~/Desktop`/`~/Downloads` (a plain `~/`
-clone works without any changes).
+What each setup guarantees: awake at 9:30 → runs at 9:30; asleep at
+9:30 but opened later → runs the moment it wakes; asleep all day with
+auto-wake + power → runs at 9:32 unattended; off/asleep all day with no
+wake → that day's slate is skipped (results still settle and feed the
+learner the next day — missed games are never bet retroactively).
 
 The slate is **today only**: games starting after the run on the same
 local calendar day. Games already underway are never bet, and tomorrow's
@@ -117,9 +140,9 @@ day games, so the full day is bettable; the rare earlier start (e.g. a
   confidence. On thin days (one sport in season) confidence — and
   therefore stakes — will be small; that's the system working, not a bug.
   If fewer than 10 games exist, it bets what's there.
-- **Out-of-season sports** simply contribute no games; today (June 30)
-  only MLB has a slate, and the other three wake up automatically when
-  their seasons start.
+- **Out-of-season sports** simply contribute no games; each league is
+  picked up automatically when its season starts. All-Star Games, the
+  Pro Bowl, and other exhibitions are never analyzed or bet.
 - **Pushes and voids** return the stake — a void counts like a push. A
   game ESPN marks postponed or canceled (rainout) voids its bets on the
   next run; a game with no result after 3 days voids as a backstop

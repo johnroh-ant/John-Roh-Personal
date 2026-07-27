@@ -18,8 +18,8 @@
                                  slate (default: most recent run)
   python bet.py weights          current learned model parameters
 
-Daily usage is a single (sleep-proof) cron line:
-  CRON_TZ=America/Los_Angeles
+Scheduling: on a Mac run `sh setup-mac.sh` once (launchd agent that
+catches up on wake); on an always-on machine a cron line works:
   */20 * * * *  cd ~/John-Roh-Personal/sports-betting && python3 bet.py daily
 """
 
