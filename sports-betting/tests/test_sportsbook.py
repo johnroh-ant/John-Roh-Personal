@@ -116,6 +116,31 @@ class TestOddsClient(unittest.TestCase):
                 odds._get("/sports/baseball_mlb/odds")
             self.assertNotIn(secret, str(ctx.exception))
 
+    def test_403_falls_back_to_alternate_identity(self):
+        # ESPN's CDN blocks one client identity per-network; a 403 must
+        # retry once as the other identity, other errors must not
+        import io
+        import urllib.error
+        from sportsbook import http
+
+        ok = mock.MagicMock()
+        ok.__enter__.return_value.status = 200
+        ok.__enter__.return_value.read.return_value = b'{"fine": 1}'
+        with mock.patch("urllib.request.urlopen") as m:
+            m.side_effect = [urllib.error.HTTPError(
+                "u", 403, "Forbidden", {}, io.BytesIO(b"blocked")), ok]
+            status, body = http.get("https://example.test/x")
+            self.assertEqual((status, body), (200, '{"fine": 1}'))
+            self.assertEqual(m.call_count, 2)
+            self.assertEqual(m.call_args_list[1][0][0]
+                             .get_header("User-agent"), "sportsbook/1.0")
+        with mock.patch("urllib.request.urlopen") as m:
+            m.side_effect = [urllib.error.HTTPError(
+                "u", 500, "boom", {}, io.BytesIO(b"err"))]
+            status, _ = http.get("https://example.test/x")
+            self.assertEqual(status, 500)
+            self.assertEqual(m.call_count, 1)  # no retry on non-403
+
     def test_stdlib_only(self):
         # the app must run under a bare system python3 (cron has no pip
         # packages): nothing in sportsbook may import third-party modules

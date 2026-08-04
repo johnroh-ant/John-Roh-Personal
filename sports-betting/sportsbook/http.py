@@ -25,19 +25,33 @@ def get(url, params=None, timeout=30):
     NetworkError."""
     if params:
         url = f"{url}?{urllib.parse.urlencode(params)}"
-    # an honest, plain UA: ESPN's CDN 403s spoofed browser UAs (no
-    # matching TLS fingerprint) but serves simple identified clients fine
-    req = urllib.request.Request(
-        url, headers={"User-Agent": "sportsbook/1.0",
-                      "Accept": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.status, resp.read().decode("utf-8", "replace")
-    except urllib.error.HTTPError as e:
+    last = (0, "")
+    for headers in _HEADER_SETS:
+        req = urllib.request.Request(url, headers=headers)
         try:
-            body = e.read().decode("utf-8", "replace")
-        except OSError:
-            body = ""
-        return e.code, body
-    except (urllib.error.URLError, socket.timeout, OSError) as e:
-        raise NetworkError(type(e).__name__) from None
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.status, resp.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as e:
+            try:
+                body = e.read().decode("utf-8", "replace")
+            except OSError:
+                body = ""
+            last = (e.code, body)
+            if e.code == 403:
+                continue  # agent-based CDN block: retry as the other identity
+            return last
+        except (urllib.error.URLError, socket.timeout, OSError) as e:
+            raise NetworkError(type(e).__name__) from None
+    return last
+
+
+# Client identities, tried in order; a 403 falls through to the next.
+# ESPN's CDN applies per-network bot rules that shift over time: the
+# custom "sportsbook/1.0" agent served fine for weeks and then started
+# getting 403s on residential networks while urllib's stock identity
+# passed (and a spoofed browser UA is 403d elsewhere). Trying both real
+# identities keeps settlement working when the rules move again.
+_HEADER_SETS = (
+    {},  # urllib's stock identity (Python-urllib/x.y)
+    {"User-Agent": "sportsbook/1.0", "Accept": "application/json"},
+)
