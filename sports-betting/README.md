@@ -132,6 +132,7 @@ day games, so the full day is bettable; the rare earlier start (e.g. a
 | `python3 bet.py status` | Bankroll, W-L-P record / staked / profit / ROI per sport, and every pending bet. |
 | `python3 bet.py history [N]` | The last N settled bets (default 25), oldest first, with result, profit, and running P/L. |
 | `python3 bet.py analysis [DATE]` | How the model saw every game on a day's slate (default: the most recent run): FanDuel's spread/total/moneyline, the model's fair line and raw unblended line, home win probability, the situational features behind the number (rest, back-to-backs, starting pitchers and their learned gap), the best side/total edge found, the bet placed if any, and the final score once known. DATE is `YYYY-MM-DD`. |
+| `python3 bet.py doctor` | Diagnose why pending bets aren't settling, from the machine it runs on: Python/SSL info, live probes of ESPN (raw and through the app's client) and The Odds API, then a dry-run of the real settlement match for every stuck bet with a per-bet verdict. |
 | `python3 bet.py weights` | The learned parameters as they evolve: home advantage, rest/back-to-back/pitcher weights, totals bias, park offsets, calibration (a, b), and the model-vs-market trust trackers. |
 
 ## Behavior notes

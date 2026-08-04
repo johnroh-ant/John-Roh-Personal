@@ -25,8 +25,11 @@ def get(url, params=None, timeout=30):
     NetworkError."""
     if params:
         url = f"{url}?{urllib.parse.urlencode(params)}"
+    # an honest, plain UA: ESPN's CDN 403s spoofed browser UAs (no
+    # matching TLS fingerprint) but serves simple identified clients fine
     req = urllib.request.Request(
-        url, headers={"User-Agent": "sportsbook/1.0", "Accept": "application/json"})
+        url, headers={"User-Agent": "sportsbook/1.0",
+                      "Accept": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.status, resp.read().decode("utf-8", "replace")

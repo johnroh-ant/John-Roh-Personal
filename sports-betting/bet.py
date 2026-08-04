@@ -16,6 +16,8 @@
                                  results and running profit
   python bet.py analysis [DATE]  how the model saw every game on a day's
                                  slate (default: most recent run)
+  python bet.py doctor           diagnose why pending bets aren't
+                                 settling (connectivity + match dry-run)
   python bet.py weights          current learned model parameters
 
 Scheduling: on a Mac run `sh setup-mac.sh` once (launchd agent that
@@ -28,7 +30,7 @@ import sys
 import zoneinfo
 
 from sportsbook import bootstrap as bootstrap_mod
-from sportsbook import config, db, mathutils, pipeline, report
+from sportsbook import config, db, espn, mathutils, pipeline, report
 from sportsbook.odds import OddsAPIError
 
 # --- terminal styling (auto-off when piped, NO_COLOR honored) ---------------
@@ -264,6 +266,110 @@ def cmd_analysis():
             print()
 
 
+def cmd_doctor():
+    """Diagnose why pending bets aren't settling, from THIS machine:
+    Python/SSL info, live probes of both data sources, then a dry-run of
+    the real settlement match for every started-but-unsettled bet."""
+    import datetime as _dt
+    import platform
+    import ssl
+    import urllib.request
+
+    from sportsbook import settle as settle_mod
+    from sportsbook.odds import OddsAPIError
+
+    print(f"\n  python  {platform.python_version()}  ({sys.executable})")
+    print(f"  ssl     {ssl.OPENSSL_VERSION}")
+
+    # --- ESPN probe: raw urllib, full error detail (no secrets in URL) ---
+    espn_ok = False
+    url = ("https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/"
+           "scoreboard?limit=5")
+    try:
+        with urllib.request.urlopen(url, timeout=20) as r:
+            print(f"  ESPN    {green('OK')} (HTTP {r.status})")
+            espn_ok = True
+    except Exception as e:
+        print(f"  ESPN    {red('FAILED')}: {e!r}")
+        print(dim("          settlement needs ESPN; this is why bets are "
+                  "stuck. If the error mentions CERTIFICATE_VERIFY_FAILED,"
+                  " run macOS's 'Install Certificates.command' for your "
+                  "Python, or use /usr/bin/python3."))
+
+    # --- ESPN through the app's own client (its UA/pathway) --------------
+    yday = (_dt.datetime.now(_dt.timezone.utc)
+            - _dt.timedelta(days=1)).strftime("%Y%m%d")
+    try:
+        n = len(espn.fetch_scoreboard("MLB", yday))
+        print(f"  ESPN(app) {green('OK')} ({n} events on {yday})")
+    except Exception as e:
+        print(f"  ESPN(app) {red('FAILED')}: {e}")
+        if espn_ok:
+            print(dim("          raw fetch works but the app's client is "
+                      "blocked — ESPN's CDN is rejecting the app's "
+                      "user-agent from this network; send me this output"))
+
+    # --- Odds API probe (sanitized errors; free endpoint) ----------------
+    try:
+        from sportsbook import odds as odds_mod
+        odds_mod._get("/sports")
+        print(f"  OddsAPI {green('OK')}")
+    except OddsAPIError as e:
+        print(f"  OddsAPI {red('FAILED')}: {e}")
+
+    # --- per-bet settlement dry run --------------------------------------
+    now = _dt.datetime.now(_dt.timezone.utc)
+    with db.session() as conn:
+        stuck = conn.execute(
+            """SELECT b.id, b.selection, b.market, g.*
+               FROM bets b JOIN games g ON g.id = b.game_id
+               WHERE b.status='pending' AND g.completed=0
+               ORDER BY g.commence_time""").fetchall()
+        started = [g for g in stuck
+                   if mathutils.parse_ts(g["commence_time"]) < now]
+        if not started:
+            print(f"\n  no started-but-unsettled bets — nothing stuck\n")
+            return
+        print(f"\n  {len(started)} stuck bet(s); replaying the settlement "
+              f"match for each:")
+        boards = {}
+        for g in started:
+            day = _dt.date.fromisoformat(g["commence_time"][:10])
+            finals, abandoned, errs = [], [], []
+            for d in (day, day - _dt.timedelta(days=1)):
+                ymd = d.strftime("%Y%m%d")
+                if ymd not in boards:
+                    try:
+                        boards[ymd] = espn.fetch_scoreboard(g["sport"], ymd)
+                    except Exception as e:
+                        boards[ymd] = e
+                board = boards[ymd]
+                if isinstance(board, Exception):
+                    errs.append(f"{ymd}: {board}")
+                    continue
+                finals += [r for r in board if r["completed"]
+                           and r["home_score"] is not None]
+                abandoned += [r for r in board
+                              if r.get("status") in
+                              settle_mod.ABANDONED_STATUSES]
+            label = f"{g['away_team']} @ {g['home_team']} ({g['commence_time'][:10]})"
+            if errs:
+                print(f"  {red('✗')} {label}: board fetch failed — {'; '.join(errs)}")
+                continue
+            hit = settle_mod._best_match(g, finals)
+            if hit:
+                print(f"  {green('✓')} {label}: would settle "
+                      f"{hit['away_score']}-{hit['home_score']} on next run")
+            elif settle_mod._best_match(g, abandoned):
+                print(f"  {yellow('◌')} {label}: postponed/canceled — "
+                      f"voids on next run")
+            else:
+                print(f"  {red('✗')} {label}: no matching final among "
+                      f"{len(finals)} fetched — name/time mismatch; "
+                      f"send this line to debug")
+        print(dim("\n  if every line is ✓, just run `bets run` — "
+                  "settlement will catch up.\n"))
+
 def cmd_weights():
     with db.session() as conn:
         for sport in config.SPORTS:
@@ -282,6 +388,7 @@ COMMANDS = {
     "daily": cmd_daily,
     "history": cmd_history,
     "analysis": cmd_analysis,
+    "doctor": cmd_doctor,
     "bootstrap": cmd_bootstrap,
     "status": cmd_status,
     "weights": cmd_weights,
