@@ -547,6 +547,116 @@ async function main() {
     check('padding never pushes the real slot over the cap', p2 && p2.arrivalSec <= 9 * 3600 + 46 * 60, p2 && clockOf(p2.arrivalSec));
   }
 
+  console.log('\n=== FIELD 2026-08-06: deadhead inside the last trip window ===');
+  {
+    // Seen live at 10:25: a bus deadheading home while the last AM trip's
+    // window is still open fell to the position-based path and projected a
+    // phantom "11:18 AM" into the midday gap. A legs arrival landing in a
+    // published-service gap must defer to the next published time.
+    const pos = pointAt(4900);
+    const d = at('2026-06-29T10:40:00-07:00');
+    const p = T.predictions(model, trips, [mkBus(pos.lat, pos.lng, 6, d.getTime())], 'work', {}, d)[0];
+    console.log('  deadhead-tail:', p && clockOf(p.arrivalSec) + '/' + p.method);
+    check('deadhead never projects a phantom arrival into the midday gap',
+      !p || p.arrivalSec >= 14 * 3600 || p.arrivalSec <= 11 * 3600,
+      p && clockOf(p.arrivalSec) + '/' + p.method);
+  }
+
+  console.log('\n=== FIELD BUG 2026-08-06: layover hold creeping the comeback ETA ===');
+  // Post-8:41 headways stretch from 15 to ~25 min; buses wait out the
+  // difference parked near the SW corner. The engine read "parked" as
+  // "driving, ever later on the old slot" and crept the ETA a second per
+  // second (9:49 shown for a bus that would serve the 9:56 slot).
+  {
+    const mkParked = (rd, whenMs) => {
+      const pt = pointAt(rd);
+      return mkBus(pt.lat, pt.lng, 0.3, whenMs);
+    };
+    const t0 = new Date('2026-06-29T09:41:00-07:00').getTime();
+    const fixes = {};
+    let arrivals = [];
+    // parked at rd 1700 (short of the Berry&King anchor), pinging every 30s
+    for (let k = 0; k <= 12; k++) {
+      const d = new Date(t0 + k * 30000);
+      const p = T.predictions(model, trips, [mkParked(1700 + (k % 2), d.getTime())], 'work', fixes, d)[0];
+      if (p) arrivals.push({ t: k * 30, arr: p.arrivalSec, method: p.method, holding: p.holding });
+    }
+    const early = arrivals[1], late = arrivals[arrivals.length - 1];
+    const held = arrivals.filter(a => a.t >= 180); // hold confirmed by 150s
+    console.log('  layover-hold: t=30s ' + clockOf(early.arr) + '/' + early.method +
+      '  t=' + late.t + 's ' + clockOf(late.arr) + '/' + late.method + (late.holding ? ' HOLDING' : ''));
+    check('confirmed hold pins the arrival to the next future run (9:56)',
+      held.length && held.every(a => Math.abs(a.arr - (9 * 3600 + 56 * 60)) < 90),
+      held.map(a => a.t + 's:' + clockOf(a.arr)).join(' '));
+    const spread = Math.max(...held.map(a => a.arr)) - Math.min(...held.map(a => a.arr));
+    check('no per-second creep once holding', spread < 60, spread + 's spread');
+  }
+  {
+    // A brief pause (one light cycle) must NOT reroute a genuinely late,
+    // moving comeback: the 2026-07-20 case still reads ~8:48.
+    const t0 = new Date('2026-06-29T08:43:00-07:00').getTime();
+    const fixes = {};
+    let p = null;
+    [1560, 1600, 1601, 1602, 1640].forEach((rd, k) => {
+      const pt = pointAt(rd);
+      const d = new Date(t0 + k * 20000);
+      p = T.predictions(model, trips, [mkBus(pt.lat, pt.lng, 4, d.getTime())], 'work', fixes, d)[0];
+    });
+    console.log('  brief-pause:', p && clockOf(p.arrivalSec) + '/' + p.method);
+    check('an 80s pause keeps the late-comeback reading (~8:48)',
+      p && p.method === 'next-trip' && !p.holding && p.arrivalSec < 8 * 3600 + 52 * 60,
+      p && clockOf(p.arrivalSec));
+  }
+  {
+    // The hold must survive same-fix render ticks (the counter-wipe class).
+    const t0 = new Date('2026-06-29T09:41:00-07:00').getTime();
+    const fixes = {};
+    const pt = pointAt(1700);
+    let p = null;
+    for (let k = 0; k <= 6; k++) {
+      const busWhen = t0 + Math.floor(k / 2) * 90000; // new fix every OTHER eval
+      const d = new Date(t0 + k * 45000);
+      p = T.predictions(model, trips, [mkBus(pt.lat, pt.lng, 0.3, busWhen)], 'work', fixes, d)[0];
+    }
+    console.log('  hold-carry:', p && clockOf(p.arrivalSec) + '/' + p.method + (p.holding ? ' HOLDING' : ''));
+    check('render ticks between pings do not reset the hold',
+      p && p.holding && Math.abs(p.arrivalSec - (9 * 3600 + 56 * 60)) < 90, p && clockOf(p.arrivalSec));
+  }
+
+  {
+    // A bus CRAWLING below the per-ping jitter threshold covers real ground
+    // and must never read as holding (displacement is measured from the
+    // episode anchor, not fix-over-fix).
+    const t0 = new Date('2026-06-29T09:41:00-07:00').getTime();
+    const fixes = {};
+    let p = null;
+    for (let k = 0; k <= 10; k++) {
+      const pt = pointAt(1500 + k * 30); // 1 m/s, 30 m per 30 s ping
+      const d = new Date(t0 + k * 30000);
+      p = T.predictions(model, trips, [mkBus(pt.lat, pt.lng, 1, d.getTime())], 'work', fixes, d)[0];
+    }
+    console.log('  crawl:', p && clockOf(p.arrivalSec) + '/' + p.method + (p.holding ? ' HOLDING' : ''));
+    check('a slow crawl through congestion never reads as holding', p && !p.holding, p && p.method);
+  }
+  {
+    // A bus blocked mid-trip BEFORE the rider's stop arrives later the
+    // longer it sits -- it must keep its (late) schedule reading, never be
+    // reclassified as holding for a future run.
+    const bmc = stopAt('Berry at Mission Creek');
+    const pt = pointAt(bmc.routeDist - 400);
+    const t0 = new Date('2026-06-29T09:12:00-07:00').getTime(); // on the 9:05 trip, ~6 min late
+    const fixes = {};
+    let p = null;
+    for (let k = 0; k <= 8; k++) {
+      const d = new Date(t0 + k * 30000);
+      p = T.predictions(model, trips, [mkBus(pt.lat, pt.lng, 0.3, d.getTime())], 'work', fixes, d)[0];
+    }
+    console.log('  blocked-midtrip:', p && clockOf(p.arrivalSec) + '/' + p.method + (p.holding ? ' HOLDING' : ''));
+    check('a blocked mid-trip bus keeps its schedule reading (target ahead)',
+      p && p.method === 'schedule' && !p.holding && p.arrivalSec < 9 * 3600 + 35 * 60,
+      p && clockOf(p.arrivalSec) + '/' + p.method);
+  }
+
   console.log('\n' + (failures ? failures + ' FAILURES' : 'ALL CHECKS PASSED'));
   process.exit(failures ? 1 : 0);
 }

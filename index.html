@@ -493,7 +493,9 @@
           els.heroArrive.textContent = top.etaMin > 90 ? 'Bus ' + top.bus.name
             : 'Bus ' + top.bus.name + ' · arrives ~' + fmtClockSec(top.arrivalSec);
           els.heroDetail.textContent = top.method === 'next-trip'
-            ? 'This bus already passed your stop — it comes around again next loop.'
+            ? (top.holding
+              ? 'Holding between runs — its next loop starts ~' + T.fmtClock(top.tripStartMin) + '.'
+              : 'This bus already passed your stop — it comes around again next loop.')
             : miles(top.meters) + ' mi away · between ' + shortName(top.legFrom) + ' and ' + shortName(top.legTo);
         }
       }
@@ -507,7 +509,11 @@
         if (a < ON_SCHEDULE_MIN) badges += '<span class="badge">on schedule</span>';
         else if (a <= DELAY_BADGE_MAX_MIN) badges += '<span class="badge ' + (d > 0 ? 'late' : 'early') + '">running ~' + a + ' min ' + (d > 0 ? 'late' : 'early') + '</span>';
       }
-      if (top.method === 'next-trip') badges += '<span class="badge">after loop turnaround</span>';
+      if (top.method === 'next-trip') {
+        badges += top.holding
+          ? '<span class="badge">holding for its next run</span>'
+          : '<span class="badge">after loop turnaround</span>';
+      }
       if (top.method === 'legs') badges += '<span class="badge">position-based estimate</span>';
       if (top.stale) badges += '<span class="badge warn">GPS ' + Math.round(top.ageSec / 60) + ' min old</span>';
       if (top.offRoute) badges += '<span class="badge warn">off usual route — approximate</span>';
@@ -534,7 +540,9 @@
       var when = p.method === 'scheduled-only' ? 'sched ' + fmtClockSec(p.arrivalSec)
         : p.etaMin + ' min <small>~' + fmtClockSec(p.arrivalSec) + '</small>';
       var where = p.method === 'scheduled-only' ? 'parked between service periods'
-        : p.method === 'next-trip' ? 'passed this stop · comes around next loop'
+        : p.method === 'next-trip' ? (p.holding
+          ? 'holding · next run ' + T.fmtClock(p.tripStartMin)
+          : 'passed this stop · comes around next loop')
           : 'between ' + esc(shortName(p.legFrom)) + ' &amp; ' + esc(shortName(p.legTo)) + (p.stale ? ' · stale GPS' : '');
       div.innerHTML = '<span class="bus">Bus ' + esc(p.bus.name) + '</span>' +
         '<span class="where">' + where + '</span>' +

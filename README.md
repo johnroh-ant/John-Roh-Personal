@@ -69,6 +69,11 @@ Stability rules derived from recorded field GPS traces (July 2026):
   lateness to your stop. A bus running 8 minutes behind serves the "8:41"
   slot at 8:49 — published times alone would skip that visit and report
   the following one.
+- **Layover holds are recognized** — after the morning peak, headways
+  stretch from 15 to ~25 minutes and buses wait out the difference parked
+  near the yard. A bus stationary past a couple of light cycles stops
+  being read as "driving, ever later" (which crept the ETA a second per
+  second); it pins to its next published departure, labeled "holding".
 - **Self-crossing continuity** — the route crosses itself at Fremont &
   Howard ~6 scheduled minutes apart; projection follows the passage
   consistent with the bus's recent motion rather than whichever line is

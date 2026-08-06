@@ -56,6 +56,10 @@
                              // GPS jitter counts toward the wrong-passage unlock
     regressUnlockCount: 3,   // consecutive regressing fixes that break the lock
                              // (~30-45 s at typical ping cadence)
+    holdMeters: 40,          // fix-over-fix movement below this (GPS jitter)
+                             // extends a stationary episode
+    holdSec: 150,            // stationary this long = holding, not paused at a
+                             // light (red lights run ~60-90 s)
     tripMatch: {
       windowBeforeSec: 15 * 60, // how early a trip is considered active (must not
                                 // exceed maxDelaySec or staged buses fall in a gap)
@@ -576,12 +580,14 @@
    * the following one (the field bug: "passed your stop — 9:07" for a bus
    * five minutes out).
    */
-  function nextOwnArrival(model, trips, fix, busSec, targetIdx) {
+  function nextOwnArrival(model, trips, fix, busSec, targetIdx, futureOnly) {
     var best = null;
     (trips || []).forEach(function (t) {
       var s0 = t.entries[0];
       var last = t.entries[t.entries.length - 1];
       if (!s0 || !last) return;
+      // a parked bus is not running a slot whose departure already passed
+      if (futureOnly && t.startMin * 60 < busSec) return;
       var tEntry = firstEntryFor(model, t, targetIdx);
       if (!tEntry) return;
       var anchorIdx = s0.idx === 0 ? model.stops.length - 1 : s0.idx;
@@ -689,6 +695,7 @@
       // projection AGREES with the schedule — clamping there would break
       // the agreement measure for every pre-start bus.
       var delay = (rawDelay < 0 && preStart) ? 0 : rawDelay;
+      var parkedHold = fix.holdSec >= CONFIG.holdSec;
       var schedResult = function (arrivalSec) {
         return {
           arrivalSec: arrivalSec, delaySec: delay, method: 'schedule',
@@ -722,8 +729,20 @@
       // position): predict its own comeback — drive to the next trip's
       // anchor, depart at max(published start, arrival there), carry the
       // lateness to the target.
-      var own = nextOwnArrival(model, trips, fix, busSec, targetIdx);
-      if (own) return { arrivalSec: Math.max(own.arrivalSec, nowSecOfDay), delaySec: null, method: 'next-trip', tripStartMin: own.tripStartMin, matchedTripStartMin: trip.startMin, matchedTauSec: tauSec };
+      // ...and a confirmed-parked bus never claims a slot whose departure
+      // already passed, whichever old trip it happened to match: the parked
+      // reading flip-flops between "late on the finished trip" and "early
+      // returning on a running one", and both creep the comeback a second
+      // per second while the bus sits out its layover.
+      var own = nextOwnArrival(model, trips, fix, busSec, targetIdx, parkedHold);
+      if (own) {
+        return {
+          arrivalSec: Math.max(own.arrivalSec, nowSecOfDay), delaySec: null,
+          method: 'next-trip', holding: parkedHold, tripStartMin: own.tripStartMin,
+          matchedTripStartMin: parkedHold ? own.tripStartMin : trip.startMin,
+          matchedTauSec: parkedHold ? null : tauSec
+        };
+      }
       return null; // no more service to that stop today
     }
 
@@ -745,6 +764,16 @@
           if (floor && legsArrival < floor.arrivalSec) {
             return { arrivalSec: floor.arrivalSec, delaySec: null, method: 'scheduled-only', tripStartMin: floor.tripStartMin };
           }
+        }
+        // A position-based arrival is only real if some trip serves the stop
+        // around then. A bus deadheading home inside the last trip's window
+        // otherwise projects a phantom arrival into the midday gap (seen
+        // live: "11:18 AM" at a stop whose service resumes 2:41 PM).
+        var pubNear = firstPublishedArrival(model, trips, targetIdx,
+          legsArrival - CONFIG.tripMatch.maxDelaySec);
+        if (!pubNear) return null; // lands after the last service of the day
+        if (pubNear.arrivalSec > legsArrival + CONFIG.tripMatch.maxDelaySec) {
+          return { arrivalSec: pubNear.arrivalSec, delaySec: null, method: 'scheduled-only', tripStartMin: pubNear.tripStartMin };
         }
         return { arrivalSec: legsArrival, delaySec: null, method: 'legs', tripStartMin: null };
       }
@@ -783,6 +812,25 @@
       var prev = prevFixes && prevFixes[bus.id];
       var fix = locateBus(model, bus, prev, trips, mod(nowSecOfDay - status.ageSec, 86400));
       if (!fix || fix.offBy > CONFIG.garageMeters) return; // garage/no-fix positions predict nothing
+      // Stationary-episode tracking: how long has this bus been parked?
+      // Displacement is measured from where the episode STARTED, not
+      // fix-over-fix — a bus crawling 30 m per ping through congestion
+      // moves hundreds of meters and must never read as parked. A same-fix
+      // re-evaluation (render tick) carries the episode unchanged.
+      var holdSince = null, holdRd = null;
+      if (prev && prev.when) {
+        if (bus.when === prev.when) {
+          holdSince = prev.holdSince || null;
+          holdRd = prev.holdRd;
+        } else {
+          var anchorRd = typeof prev.holdRd === 'number' ? prev.holdRd : prev.routeDist;
+          if (loopGap(fix.routeDist, anchorRd, model.path.length) < CONFIG.holdMeters) {
+            holdSince = prev.holdSince || prev.when;
+            holdRd = anchorRd;
+          }
+        }
+      }
+      fix.holdSec = holdSince ? Math.max(0, (bus.when - holdSince) / 1000) : 0;
       var p = predictBus(model, trips, fix, bus, targetIdx, nowSecOfDay,
         nowSecOfDay - status.ageSec, prev);
       if (prevFixes) {
@@ -795,7 +843,8 @@
           tripStartMin: p && typeof p.matchedTripStartMin === 'number' ? p.matchedTripStartMin
             : (prev ? prev.tripStartMin : null),
           tauSec: p && typeof p.matchedTauSec === 'number' ? p.matchedTauSec
-            : (prev ? prev.tauSec : null)
+            : (prev ? prev.tauSec : null),
+          holdSince: holdSince, holdRd: holdRd
         };
       }
       if (!p) return;
@@ -811,6 +860,7 @@
         arrivalSec: arrivalSec,
         delaySec: p.delaySec,
         method: p.method,
+        holding: !!p.holding,
         tripStartMin: p.tripStartMin,
         meters: distanceAlong(model, fix.routeDist, targetIdx),
         legFrom: model.stops[k - 1].name,
