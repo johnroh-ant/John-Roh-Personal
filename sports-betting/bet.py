@@ -121,6 +121,8 @@ def cmd_status():
             total = sum(b["stake"] for b in pending)
             print(f"\n  {bold('PENDING')} "
                   f"{dim(f'({len(pending)} bets, ${total:,.0f} at risk)')}")
+            print(dim("  stake = confidence = EV per $ × 1000, capped at "
+                      "100 (so conf 100 means a ≥ +10% edge)"))
             print(dim("  " + RULE))
             import datetime as _dt
             now = _dt.datetime.now(_dt.timezone.utc)
@@ -140,6 +142,8 @@ def cmd_status():
                 print(f"  ${b['stake']:>3.0f}  {dim('conf')} "
                       f"{b['confidence']:>3}  {b['sport']:<6} "
                       f"{bold(f'{desc:<34}')} {dim(meta)}{flag}")
+                for line in report.bet_reasoning(conn, b):
+                    print(dim(f"        {line}"))
         print()
 
 

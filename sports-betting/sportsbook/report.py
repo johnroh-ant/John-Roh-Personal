@@ -148,3 +148,96 @@ def bet_desc(b):
     if b["market"] == "moneyline":
         return f"{b['selection']} ML"
     return f"{b['selection']} {fmt_spread(b['line'])}"
+
+
+# labels for the situational features, phrased for a reader
+_FEATURE_LABELS = {
+    "home_adv": "home field",
+    "pitcher_gap": "starter edge",
+    "rest_diff": "rest edge",
+    "home_b2b": "back-to-back",
+    "away_b2b": "opponent on a back-to-back",
+}
+
+
+def bet_reasoning(conn, b):
+    """Plain-language 'why' lines for a bet row (which must carry run_date,
+    game_id, sport, market, selection, line, price, win_prob, edge, and the
+    game's home/away teams). Reconstructed from the stored prediction: the
+    model-vs-market line gap, the price math, and the drivers behind the
+    number. Returns [] when the pre-game analysis isn't stored."""
+    import json as _json
+
+    from . import mathutils
+    from .models import MODELS
+
+    p = conn.execute(
+        "SELECT * FROM predictions WHERE game_id=? AND run_date=?",
+        (b["game_id"], b["run_date"])).fetchone()
+    if p is None:
+        return []
+    feats = _json.loads(p["features"])
+    x, ctx, raw = (feats.get("x", {}), feats.get("ctx", {}),
+                   feats.get("raw", {}))
+    model = MODELS[b["sport"]](conn)
+    unit = "runs" if b["sport"] == "MLB" else "pts"
+    breakeven = mathutils.american_to_prob(b["price"])
+    team = b["selection"]
+    sel_home = team == b["home_team"]
+
+    if b["market"] == "total":
+        raw_t, fair_t = raw.get("total"), p["pred_total"]
+        head = (f"model total {fair_t:.1f}"
+                + (f" (raw {raw_t:.1f})" if raw_t is not None else "")
+                + f" vs line {b['line']:g} → {team} hits "
+                f"{b['win_prob']:.0%} vs {breakeven:.0%} needed at "
+                f"{b['price']:+d} → {b['edge']:+.1%}/$ edge")
+        drivers = []
+        park = (model.w.get(f"park:{b['home_team']}", 0.0)
+                if b["sport"] == "MLB" else 0.0)
+        if raw_t is not None:
+            base = raw_t - park - model.w.get("total_bias", 0.0)
+            drivers.append(f"teams' scoring rates project {base:.1f}")
+        if abs(park) >= 0.2:
+            drivers.append(f"home-park effect {park:+.1f} {unit}")
+        drivers.append(f"model carries {model.alpha_total:.0%} weight "
+                       f"vs the market's total")
+        return [head, "why: " + " · ".join(drivers)]
+
+    # sides: spread or moneyline, phrased from the selection's perspective
+    fair_m = p["pred_home_margin"] if sel_home else -p["pred_home_margin"]
+    raw_m = raw.get("margin")
+    if raw_m is not None and not sel_home:
+        raw_m = -raw_m
+    fair_txt = (f"fair line {team} {-fair_m:+.1f}"
+                + (f" (model alone {-raw_m:+.1f})"
+                   if raw_m is not None else ""))
+    if b["market"] == "moneyline":
+        head = (f"model gives {team} {b['win_prob']:.0%} to win vs "
+                f"{breakeven:.0%} implied at {b['price']:+d} → "
+                f"{b['edge']:+.1%}/$ edge; {fair_txt}")
+    else:
+        head = (f"{team} {b['line']:+g} covers {b['win_prob']:.0%} vs "
+                f"{breakeven:.0%} needed at {b['price']:+d} → "
+                f"{b['edge']:+.1%}/$ edge; {fair_txt}")
+
+    drivers = []
+    situational = 0.0
+    for k, v in x.items():
+        wv = model.w.get(k, 0.0) * v
+        situational += wv
+        shown = wv if sel_home else -wv
+        if abs(shown) < 0.05:
+            continue
+        label = _FEATURE_LABELS.get(k, k)
+        if k == "pitcher_gap" and (ctx.get("home_pitcher")
+                                   or ctx.get("away_pitcher")):
+            label += (f" ({ctx.get('home_pitcher') or '?'} vs "
+                      f"{ctx.get('away_pitcher') or '?'})")
+        drivers.append(f"{label} {shown:+.1f} {unit}")
+    if raw_m is not None:
+        quality = raw_m - (situational if sel_home else -situational)
+        drivers.insert(0, f"team quality {quality:+.1f} {unit}")
+    drivers.append(f"model carries {model.alpha_margin:.0%} weight "
+                   f"vs the market's line")
+    return [head, "why: " + " · ".join(drivers)]

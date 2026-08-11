@@ -241,6 +241,57 @@ class TestPostponedGamesVoidImmediately(DBTestCase):
                 "SELECT status FROM bets").fetchone()["status"], "pending")
 
 
+class TestBetReasoning(DBTestCase):
+    def test_reasoning_explains_price_math_and_drivers(self):
+        import json
+        from sportsbook import report
+        with db.session() as conn:
+            gid = db.upsert_game(conn, "MLB", odds_id="r1",
+                                 commence_time="2026-06-30T23:00:00Z",
+                                 home_team="Philadelphia Phillies",
+                                 away_team="Pittsburgh Pirates")
+            conn.execute(
+                """INSERT INTO predictions (game_id, run_date, sport,
+                       features, pred_home_margin, pred_total, pred_home_wp,
+                       market_home_spread, market_total, market_home_ml,
+                       market_away_ml, side_edge, total_edge)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (gid, "2026-06-30", "MLB", json.dumps({
+                    "x": {"home_adv": 1.0, "pitcher_gap": 1.02},
+                    "ctx": {"home_pitcher": "Cristopher Sanchez",
+                            "away_pitcher": "Bubba Chandler"},
+                    "raw": {"margin": 1.7, "total": 11.8}}),
+                 1.8, 9.5, 0.687, -1.5, 8.5, -230, 190, 0.032, 0.181))
+            conn.execute(
+                """INSERT INTO bets (run_date, sport, game_id, market,
+                       selection, line, price, win_prob, edge, confidence,
+                       stake) VALUES ('2026-06-30','MLB',?,'total','Over',
+                       8.5,100,0.591,0.182,100,100)""", (gid,))
+            b = conn.execute(
+                """SELECT b.*, g.home_team, g.away_team FROM bets b
+                   JOIN games g ON g.id=b.game_id""").fetchone()
+            lines = " | ".join(report.bet_reasoning(conn, b))
+            self.assertIn("59%", lines)          # win prob vs breakeven
+            self.assertIn("50%", lines)
+            self.assertIn("+18.2%/$", lines)     # the edge
+            self.assertIn("scoring rates", lines)
+            # a moneyline bet names the starters among its drivers
+            conn.execute("DELETE FROM bets")
+            conn.execute(
+                """INSERT INTO bets (run_date, sport, game_id, market,
+                       selection, line, price, win_prob, edge, confidence,
+                       stake) VALUES ('2026-06-30','MLB',?,'moneyline',
+                       'Philadelphia Phillies',NULL,-230,0.687,0.02,20,20)""",
+                (gid,))
+            b = conn.execute(
+                """SELECT b.*, g.home_team, g.away_team FROM bets b
+                   JOIN games g ON g.id=b.game_id""").fetchone()
+            lines = " | ".join(report.bet_reasoning(conn, b))
+            self.assertIn("69% to win", lines)
+            self.assertIn("Cristopher Sanchez", lines)
+            self.assertIn("team quality", lines)
+
+
 class TestDailyGate(DBTestCase):
     """`bet.py daily` runs once per day, at/after RUN_AFTER local time."""
 
