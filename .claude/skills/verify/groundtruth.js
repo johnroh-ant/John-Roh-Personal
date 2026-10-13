@@ -10,7 +10,8 @@
  * Options:
  *   --tracker <path>   engine (default: the repo's tracker.js)
  *   --site <path>      site JSON fixture (route polyline/stops)   (default: verify/lts-fresh.json)
- *   --dep <path>       departure-data JSON fixture (timetable)    (default: verify/dep-*.json)
+ *   --dep <path>       departure data: a JSON fixture, or a recorder's
+ *                      <out>-departures.jsonl (its first snapshot)  (default: verify/dep-*.json)
  *   --modes home,work  rider stops to score (default both)
  *   --tick <sec>       ALSO replay on a render tick of <sec> seconds (the app
  *                      re-renders every 15 s between pings, so GPS silence
@@ -80,7 +81,13 @@ const JSON_OUT = argOf('json', null);
 
 const model = T.buildLoopModel(JSON.parse(fs.readFileSync(sitePath, 'utf8')));
 if (!model) throw new Error('no loop model from ' + sitePath);
-const trips = T.buildTrips(JSON.parse(fs.readFileSync(depPath, 'utf8')), model);
+function loadDepartures(p) {
+  const txt = fs.readFileSync(p, 'utf8').trim();
+  // record.js writes one {poll, sha1, data} line per changed snapshot
+  if (txt.startsWith('{')) return JSON.parse(txt.split('\n')[0]).data;
+  return JSON.parse(txt);
+}
+const trips = T.buildTrips(loadDepartures(depPath), model);
 const L = model.path.length;
 
 // ------------------------------------------------------------------ utils
@@ -352,8 +359,10 @@ function loadTrace(p) {
   if (txt.startsWith('[')) rows = JSON.parse(txt);
   else rows = txt.split('\n').map(l => { try { return JSON.parse(l); } catch (e) { return null; } });
   // recordings made with the fleet recorder carry every TMA route: keep this one
+  // (rows with no route key at all are the older single-route format; a
+  // fleet row with route null is a bus not assigned to any route)
   return rows.filter(r => r && Number.isFinite(r.lat) && Number.isFinite(r.lng) && Number.isFinite(r.when) &&
-    (!r.route || r.route === T.CONFIG.routeId));
+    (!('route' in r) || (r.route && typeof r.route === 'object' ? r.route.id : r.route) === T.CONFIG.routeId));
 }
 
 function evaluate(busName, track, visitsByMode, holds, mode, times) {

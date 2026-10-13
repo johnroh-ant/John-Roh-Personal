@@ -71,12 +71,26 @@ another server root (e.g. a scratch copy of the app).
 
 ## Recording field data
 
-When the feed is reachable, a 5 s poller of
-`GET https://api.gettrakk.com/v1/live-tracking-site?version=1` (headers
-`tr-org-id` / `tr-org-token` from `CONFIG` in `tracker.js`) appending one
-JSON line per device per distinct `deviceUpdate.when` makes a recording
-`groundtruth.js` can score. Ask the user before recording from a different
-environment than the session's own.
+Recording is a data-collection run the user approves: ask before starting
+one unless the user asked for it. It needs the live feed, which the
+"John-Roh-Personal" cloud environment reaches (the default one gets a proxy
+403, and the recorder then stops with exit 1 after ~30 s).
+
+```bash
+# end time needs an explicit zone: Pacific is -07:00 until Nov 1, -08:00 after
+node .claude/skills/verify/record.js /tmp/field-2026-10-14-am.jsonl 2026-10-14T11:00:00-07:00
+```
+
+Run it as a background command with a 2-hour timeout (`timeout: 7200000`;
+the default is 30 min). Each run stops at the end time or after
+`--max-minutes` (default 100) and prints a JSON summary; run it again with
+the same arguments until the summary says `"done":true` — it resumes without
+duplicating fixes. It records every route (5 s polls, one line per device per
+distinct fix) and the feed's departure data every 15 min when it changed
+(`<out>-departures.jsonl`, image URLs scrubbed). Score a recording against
+the timetable the app saw that day with
+`groundtruth.js <out>.jsonl --dep <out>-departures.jsonl`. Copy both files
+into `.claude/skills/verify/` to commit them.
 
 ## Service hours
 

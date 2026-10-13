@@ -358,25 +358,39 @@
 
   // ------------------------------------------------------------------ buses
 
+  // One live-feed device, normalized for any route (shared by the app and
+  // the field recorder): route id whether the feed sends an id or {id}, fix
+  // time from `when` or the ISO `updatedAt` fallback.
+  function normalizeDevice(d) {
+    var u = d.deviceUpdate || {};
+    var w = u.when || u.updatedAt;
+    if (typeof w !== 'number') w = Date.parse(w) || 0;
+    return {
+      id: d.id,
+      name: (d.settings && d.settings.nickname) || d.displayId || d.deviceName || 'Shuttle',
+      routeId: typeof d.route === 'object' && d.route ? d.route.id : d.route,
+      online: d.online,
+      lat: u.latitude, lng: u.longitude,
+      speed: u.speed, heading: u.heading,
+      when: w,
+      showOnMap: d.showOnMap !== false
+    };
+  }
+
   function extractBuses(site) {
     var devices = (site.liveTrackingSite || {}).devices || [];
-    return devices.filter(function (d) {
-      var routeId = typeof d.route === 'object' && d.route ? d.route.id : d.route;
-      return routeId === CONFIG.routeId && d.online !== false && d.deviceUpdate &&
-        validCoord(d.deviceUpdate.latitude, d.deviceUpdate.longitude);
-    }).map(function (d) {
-      var u = d.deviceUpdate;
-      var w = u.when || u.updatedAt;
-      if (typeof w !== 'number') w = Date.parse(w) || 0;
+    return devices.filter(function (d) { return d.deviceUpdate; }).map(normalizeDevice).filter(function (b) {
+      return b.routeId === CONFIG.routeId && b.online !== false && validCoord(b.lat, b.lng);
+    }).map(function (b) {
       return {
-        id: d.id,
-        name: (d.settings && d.settings.nickname) || d.displayId || d.deviceName || 'Shuttle',
-        lat: u.latitude, lng: u.longitude,
-        speed: u.speed || 0,
+        id: b.id,
+        name: b.name,
+        lat: b.lat, lng: b.lng,
+        speed: b.speed || 0,
         // clamp clock skew: a future timestamp would otherwise pin the bus
         // as eternally fresh and outvote every later update
-        when: Math.min(w, Date.now() + 5000),
-        showOnMap: d.showOnMap !== false
+        when: Math.min(b.when, Date.now() + 5000),
+        showOnMap: b.showOnMap
       };
     });
   }
@@ -1408,6 +1422,7 @@
     findStopIndex: findStopIndex,
     isModeStop: isModeStop,
     extractBuses: extractBuses,
+    normalizeDevice: normalizeDevice,
     busStatus: busStatus,
     applyPing: applyPing,
     locateBus: locateBus,
