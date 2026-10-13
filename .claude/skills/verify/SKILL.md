@@ -1,53 +1,84 @@
 ---
 name: verify
-description: Drive the Mission Bay shuttle tracker end-to-end — local server, Playwright with Node-fulfilled network, live-data harness, and field-trace replay.
+description: Drive the Mission Bay shuttle tracker end-to-end — offline page simulator, scenario/regression harness, and ground-truth scoring against recorded field GPS.
 ---
 
 # Verifying the shuttle tracker
 
 Static app: `index.html` + `tracker.js` (UMD — loads in browser and Node).
-No build step.
+No build step. All commands below run from the repo root.
 
-## Launch
+## Network
 
-```bash
-(nohup python3 -m http.server 8765 >/dev/null 2>&1 &)   # MUST run from repo root
-```
+The live feed (`api.gettrakk.com`) and the page's CDN libraries (`unpkg.com`,
+`js.pusher.com`) may be blocked in the session's network. Everything here
+works offline from the committed fixtures; live data is a bonus, never a
+requirement. Do not route around a blocked host — ask the user.
 
-## Browser driving — the one big gotcha
-
-Headless Chromium CANNOT reach HTTPS through this container's agent proxy
-(all CONNECTs reset; curl/Node work fine). Intercept and fulfill via Node:
-
-```js
-const browser = await chromium.launch({ executablePath: '/opt/pw-browsers/chromium', args: ['--no-sandbox'] });
-await ctx.route(/^https:\/\//, async route => { /* fetch() in Node, route.fulfill(...) */ });
-```
-
-- Pusher falls back to HTTPS long-polling under this interception (its
-  sockjs POSTs 404 — harness artifact, ignore).
-- To simulate buses: rewrite the `/live-tracking-site?` JSON in the route
-  handler (set devices' `deviceUpdate` {latitude, longitude, speed, when}).
-  With `page.clock.install`, compute `when` from the MOCKED epoch, not
-  real `Date.now()` (test-side), or the bus reads as dead.
-- Time-of-day states (midday gap, weekend, Friday night, morning rush):
-  `page.clock.install({ time: new Date('...T08:35:00-07:00') })`.
-
-## Engine validation (Node, live API)
+## Engine checks (Node, offline-capable)
 
 ```bash
-NODE_EXTRA_CA_CERTS=/root/.ccr/ca-bundle.crt node .claude/skills/verify/harness.js
-NODE_EXTRA_CA_CERTS=/root/.ccr/ca-bundle.crt node .claude/skills/verify/replay.js
+node .claude/skills/verify/harness.js        # ~85 checks; falls back to fixtures
+HARNESS_OFFLINE=1 node .claude/skills/verify/harness.js   # force fixtures
+node .claude/skills/verify/scenarios.js      # 23 hold scenarios, warm + cold
+node .claude/skills/verify/groundtruth.js .claude/skills/verify/traces.jsonl
+node .claude/skills/verify/groundtruth.js .claude/skills/verify/field-2026-10-13-am.jsonl
+node .claude/skills/verify/replay.js         # older stability replay (July traces)
 ```
 
-`harness.js` fetches live Trakk data and runs ~60 scenario checks
-(staged buses, stale GPS, passed-stop, hysteresis, departed-bus,
-malformed feeds). `replay.js` replays the recorded field GPS traces
-(`traces.jsonl`, 2026-07-01 PM service, with its JSON fixtures beside
-it) and reports delay-sign flips / trip flips / arrival jumps — expect 0/0/0 for buses on the
-standard loop, plus two benign trip-boundary corrections for 66065.
+- `harness.js` — scenario checks, each FIELD section encodes a real report.
+- `scenarios.js` — synthetic holds before/at/past the rider's stops; exit
+  code = HARD flags (false "passed"). Expected today: 39 hard, all in S2c — a
+  bus that drives 200 m past the stop and only then stops reads "passed" for
+  its first 150 s there (recorded stops that far past were all departed buses
+  at the next light). Controls S4/S4b/S6a-d must stay at 0.
+- `groundtruth.js <trace>` — replays a recording through the engine every
+  fix and every 15 s tick and grades each prediction against what the bus
+  actually did (Viterbi-decoded track): FALSE-DEPARTED, late/early ETA error,
+  "after-bus-left" (rider would miss it). Accepts the fleet recorder's
+  all-route files (filters to the TransBay route). `--tracker <path>` scores a
+  modified engine copy; `--bus`, `--modes`, `--log`, `--json` narrow/dump.
+- `replay.js` — delay-sign flips / trip changes / arrival jumps. Expected:
+  0/0/0 except 66065 at 2/1/2 — one is the 14:56:48 correction when it
+  leaves the staging lot (re-read off the lot's passage onto its 3:10 run).
+  Today's ground truth: FALSE-DEPARTED hard 0 in every replay of both
+  recordings.
+- Field recordings: `traces.jsonl` (2026-07-01 PM, 3 buses) and
+  `field-2026-10-13-am.jsonl` (10:00-10:52 AM, all routes; TransBay buses
+  20018, 20024, 76084). Fixtures: `lts-fresh.json`, `dep-*.json` (image URLs
+  scrubbed, so the two stop-image checks only run live).
 
-## Service hours (for choosing live vs mocked checks)
+## Page checks (offline simulator)
 
-Mon–Fri only. AM ~5:59–10:12, PM ~14:30–19:51 PT. Outside those, buses
-are absent/parked — use clock mocking.
+Headless Chromium cannot use the agent proxy. `pagesim.js` serves the real
+page from a local server, fulfills the CDN libraries from npm copies,
+answers the Trakk API from the fixtures with scripted buses, and mocks the
+clock:
+
+```bash
+mkdir -p "$SCRATCH/pagesim" && cd "$SCRATCH/pagesim" && \
+  PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install playwright leaflet@1.9.4 pusher-js@8.2.0
+(cd /path/to/repo && nohup python3 -m http.server 8765 >/dev/null 2>&1 &)   # repo root!
+PAGESIM_MODULES="$SCRATCH/pagesim/node_modules" \
+  node .claude/skills/verify/pagesim.js .claude/skills/verify/scenarios/field-report.js
+```
+
+A scenario module exports `{name, start, mode, duration, readEvery,
+buses(tSec) -> [{name, rd, speed, ageSec?}]}` (rd = route distance in m;
+`ageSec` makes the fix stale). Output is one line per read: hero big text,
+arrive line, detail, badges. `PAGE=http://localhost:8766/` points it at
+another server root (e.g. a scratch copy of the app).
+
+## Recording field data
+
+When the feed is reachable, a 5 s poller of
+`GET https://api.gettrakk.com/v1/live-tracking-site?version=1` (headers
+`tr-org-id` / `tr-org-token` from `CONFIG` in `tracker.js`) appending one
+JSON line per device per distinct `deviceUpdate.when` makes a recording
+`groundtruth.js` can score. Ask the user before recording from a different
+environment than the session's own.
+
+## Service hours
+
+Mon–Fri only. AM ~5:59–10:46 (buses observed in service until ~10:52), PM
+~14:30–20:15 PT. The feed's timetable is stale (see README Caveats).

@@ -437,7 +437,7 @@
     var preds = T.predictions(state.model, state.trips, state.buses, state.mode, state.prevFixes, now);
     // set on every path, including the no-service early return below — a
     // latched value would hold the fast poll cadence on a day with no buses
-    state.topEtaSec = preds[0] ? preds[0].etaSec : null;
+    state.topEtaSec = preds[0] && isFinite(preds[0].etaSec) ? preds[0].etaSec : null;
     var schedMins = modeData().schedMins;
     var nextSched = T.nextScheduled(schedMins, nowTz.minutes, 3);
 
@@ -455,8 +455,13 @@
       return;
     }
 
-    var top = preds[0];
+    // a parked-off-route bus is listed but never the headline
+    var live = preds.filter(function (p) { return p.method !== 'parked'; });
+    var top = live[0];
+    state.topEtaSec = top ? top.etaSec : null;
     if (top) {
+      var ageMin = Math.max(1, Math.round(top.ageSec / 60));
+      var bus = 'Bus ' + top.bus.name;
       if (top.method === 'scheduled-only') {
         // between service periods the clock time is the readable answer,
         // not a 3-digit minute count
@@ -464,45 +469,73 @@
         els.heroBig.className = 'big dim';
         els.heroArrive.textContent = 'Next scheduled shuttle';
         els.heroDetail.textContent = 'Shuttles are between service periods right now.';
-      } else if (top.stale) {
-        // GPS is quiet: don't speak with certainty, and never imply the bus
-        // left — the prediction is pinned to its last known position
-        var ageMin = Math.max(1, Math.round(top.ageSec / 60));
-        if (top.etaSec < ARRIVING_NOW_SEC) {
-          els.heroBig.textContent = 'Due';
-          els.heroArrive.textContent = 'Bus ' + top.bus.name + ' should be there — awaiting GPS';
-        } else {
-          setHeroTime(top);
-          els.heroArrive.textContent = 'Bus ' + top.bus.name + ' · due ~' + fmtClockSec(top.arrivalSec) + ' · awaiting GPS';
-        }
-        els.heroBig.className = 'big dim';
-        els.heroDetail.textContent = top.method === 'next-trip'
-          ? 'Passed your stop before its GPS went quiet ' + ageMin + ' min ago — it comes around again next loop.'
-          : 'Last seen ' + ageMin + ' min ago, ' + miles(top.meters) + ' mi away between ' +
-            shortName(top.legFrom) + ' and ' + shortName(top.legTo) + '.';
+      } else if (top.method === 'at-stop') {
+        // at (or stopped just past) the stop: never a countdown, never a
+        // promised departure time — buses don't wait for the clock here
+        els.heroBig.textContent = top.ambiguous ? 'Near' : top.justPast ? 'Just past' : 'Here';
+        els.heroBig.className = top.stale ? 'big dim' : 'big';
+        els.heroArrive.textContent = top.ambiguous
+          ? bus + ' is stopped ~' + Math.round((top.poleMeters || 0) / 10) * 10 + ' m from your stop'
+          : top.justPast ? bus + ' is stopped just past your stop'
+          : top.stale ? bus + ' · at your stop when last seen' : bus + ' is at your stop';
+        els.heroDetail.textContent = top.ambiguous
+          ? 'Can\'t tell yet which way it is headed — check the map; this updates on its next ping.'
+          : top.stale
+          ? 'Last seen there ' + ageMin + ' min ago — buses often go GPS-quiet while parked.'
+          : top.justPast ? 'About ' + Math.round(top.pastMeters / 10) * 10 + ' m past the pole — it may have already picked up. Watch the map.'
+          : 'It can leave any moment — head out now.';
+      } else if (top.method === 'next-trip') {
+        setHeroTime(top);
+        if (top.stale) els.heroBig.className = 'big dim';
+        els.heroArrive.textContent = top.etaMin > 90 ? bus : bus + ' · ' + (top.estimated ? 'about ' : 'arrives ~') + fmtClockSec(top.arrivalSec);
+        els.heroDetail.textContent = top.holding
+          ? (top.tripStartMin != null ? 'Holding between runs — its next loop starts ~' + T.fmtClock(top.tripStartMin) + '.'
+            : 'Holding between runs — that time assumes it leaves now.')
+          : top.recentlyPassed
+            ? (top.stale ? 'Passed your stop before its GPS went quiet ' + ageMin + ' min ago — it comes around again next loop.'
+              : 'This bus already passed your stop — it comes around again next loop.')
+            : 'Finishing its loop — its next run reaches your stop' + (top.estimated ? ' (estimated).' : '.');
       } else {
-        if (top.etaSec < ARRIVING_NOW_SEC) {
+        // on its way: schedule / position-based
+        var stoppedNear = top.stopped && top.meters < 1200;
+        if (top.latestSec) {
+          // waiting somewhere it may leave from early: earliest .. timetable
+          var hi = Math.round((top.latestSec - (top.arrivalSec - top.etaSec)) / 60);
+          els.heroBig.innerHTML = top.etaMin + '–' + hi + '<small>min</small>';
+          els.heroBig.className = top.stale ? 'big dim' : 'big';
+        } else if (top.etaSec < ARRIVING_NOW_SEC && !top.stale) {
           els.heroBig.textContent = 'Now';
           els.heroBig.className = 'big';
-          els.heroArrive.textContent = 'Bus ' + top.bus.name + ' is arriving';
-          // the loop-around meters are meaningless mid-arrival ("5.9 mi
-          // away" under a giant "Now" reads as a glitch)
-          els.heroDetail.textContent = 'Pulling up at your stop — watch the map.';
+        } else if (top.etaSec < ARRIVING_NOW_SEC) {
+          els.heroBig.textContent = 'Due';
+          els.heroBig.className = 'big dim';
         } else {
           setHeroTime(top);
-          els.heroArrive.textContent = top.etaMin > 90 ? 'Bus ' + top.bus.name
-            : 'Bus ' + top.bus.name + ' · arrives ~' + fmtClockSec(top.arrivalSec);
-          els.heroDetail.textContent = top.method === 'next-trip'
-            ? (top.holding
-              ? 'Holding between runs — its next loop starts ~' + T.fmtClock(top.tripStartMin) + '.'
-              : 'This bus already passed your stop — it comes around again next loop.')
-            : miles(top.meters) + ' mi away · between ' + shortName(top.legFrom) + ' and ' + shortName(top.legTo);
+          if (top.stale) els.heroBig.className = 'big dim';
         }
+        els.heroArrive.textContent = top.waitingAt ? bus + ' · waiting at ' + shortName(top.waitingAt)
+          : stoppedNear ? bus + ' · stopped ' + miles(top.meters) + ' mi before your stop'
+          : top.latestSec ? bus + ' · ' + fmtClockSec(top.arrivalSec) + '–' + fmtClockSec(top.latestSec)
+          : top.etaSec < ARRIVING_NOW_SEC && !top.stale ? bus + ' is arriving'
+          : top.stale ? bus + ' · due ~' + fmtClockSec(top.arrivalSec) + ' · awaiting GPS'
+          : top.etaMin > 90 ? bus : bus + ' · arrives ~' + fmtClockSec(top.arrivalSec);
+        els.heroDetail.textContent = top.ambiguous
+          ? 'Can\'t tell yet which way it is headed — this is the sooner reading; check the map.'
+          : top.latestSec && top.beforeRun
+          ? 'Its run hasn\'t started — the timetable says ~' + fmtClockSec(top.latestSec) + ', but runs often start early.'
+          : top.latestSec
+          ? 'Timetable: at your stop ~' + fmtClockSec(top.latestSec) + ' — it could leave sooner.'
+          : top.waitingAt && top.holding ? 'No timetabled departure — the time assumes it leaves now.'
+          : top.stale ? 'Last seen ' + ageMin + ' min ago, ' + miles(top.meters) + ' mi away between ' +
+            shortName(top.legFrom) + ' and ' + shortName(top.legTo) + '.'
+          : top.etaSec < ARRIVING_NOW_SEC ? 'Pulling up at your stop — watch the map.'
+          : miles(top.meters) + ' mi away · between ' + shortName(top.legFrom) + ' and ' + shortName(top.legTo);
       }
       // badges
       var badges = '';
-      // adherence can't be vouched for from a stale fix
-      if (top.delaySec !== null && top.method === 'schedule' && !top.stale) {
+      // adherence can't be vouched for from a stale fix, nor for a bus that
+      // is waiting to leave (its timetable slot is the question, not a fact)
+      if (top.delaySec !== null && top.method === 'schedule' && !top.stale && !top.latestSec && !top.waitingAt) {
         var d = Math.round(top.delaySec / 60), a = Math.abs(d);
         // beyond DELAY_BADGE_MAX_MIN the early/late attribution is ambiguous
         // between two adjacent trips (the arrival time is the same either way)
@@ -510,12 +543,13 @@
         else if (a <= DELAY_BADGE_MAX_MIN) badges += '<span class="badge ' + (d > 0 ? 'late' : 'early') + '">running ~' + a + ' min ' + (d > 0 ? 'late' : 'early') + '</span>';
       }
       if (top.method === 'next-trip') {
-        badges += top.holding
-          ? '<span class="badge">holding for its next run</span>'
-          : '<span class="badge">after loop turnaround</span>';
+        badges += top.holding ? '<span class="badge">holding for its next run</span>'
+          : top.recentlyPassed ? '<span class="badge">after loop turnaround</span>'
+          : '<span class="badge">next run</span>';
       }
-      if (top.method === 'legs') badges += '<span class="badge">position-based estimate</span>';
-      if (top.stale) badges += '<span class="badge warn">GPS ' + Math.round(top.ageSec / 60) + ' min old</span>';
+      if (top.estimated || (top.method === 'legs' && !top.stale)) badges += '<span class="badge">position-based estimate</span>';
+      if (top.ambiguous && top.method !== 'at-stop') badges += '<span class="badge warn">direction unclear</span>';
+      if (top.stale) badges += '<span class="badge warn">GPS ' + ageMin + ' min old</span>';
       if (top.offRoute) badges += '<span class="badge warn">off usual route — approximate</span>';
       els.heroBadges.innerHTML = badges;
     } else {
@@ -523,7 +557,8 @@
       if (nextSched.length) {
         els.heroBig.textContent = T.fmtClock(nextSched[0]);
         els.heroArrive.textContent = 'Next scheduled shuttle';
-        els.heroDetail.textContent = 'No shuttle is live on the route right now.';
+        els.heroDetail.textContent = preds.length ? 'The only bus nearby is parked off the route.'
+          : 'No shuttle is live on the route right now.';
       } else {
         els.heroBig.textContent = 'Done for today';
         els.heroArrive.textContent = '';
@@ -534,16 +569,22 @@
     }
 
     // secondary bus rows
-    preds.slice(1).forEach(function (p) {
+    preds.filter(function (p) { return p !== top; }).forEach(function (p) {
       var div = document.createElement('div');
       div.className = 'row';
-      var when = p.method === 'scheduled-only' ? 'sched ' + fmtClockSec(p.arrivalSec)
+      var when = p.method === 'parked' ? '—'
+        : p.method === 'at-stop' ? 'now'
+        : p.method === 'scheduled-only' ? 'sched ' + fmtClockSec(p.arrivalSec)
+        : p.latestSec ? p.etaMin + '–' + Math.round((p.latestSec - (p.arrivalSec - p.etaSec)) / 60) + ' min'
         : p.etaMin + ' min <small>~' + fmtClockSec(p.arrivalSec) + '</small>';
-      var where = p.method === 'scheduled-only' ? 'parked between service periods'
+      var where = p.method === 'parked' ? 'parked off-route · not in service'
+        : p.method === 'at-stop' ? (p.ambiguous ? 'stopped near your stop' : p.justPast ? 'stopped just past your stop' : 'at your stop')
+        : p.method === 'scheduled-only' ? 'parked between service periods'
         : p.method === 'next-trip' ? (p.holding
-          ? 'holding · next run ' + T.fmtClock(p.tripStartMin)
-          : 'passed this stop · comes around next loop')
-          : 'between ' + esc(shortName(p.legFrom)) + ' &amp; ' + esc(shortName(p.legTo)) + (p.stale ? ' · stale GPS' : '');
+          ? 'holding' + (p.tripStartMin != null ? ' · next run ' + T.fmtClock(p.tripStartMin) : '')
+          : p.recentlyPassed ? 'passed this stop · comes around next loop' : 'finishing its loop · next run')
+        : p.waitingAt ? 'waiting at ' + esc(shortName(p.waitingAt))
+        : (p.stopped ? 'stopped · ' : '') + 'between ' + esc(shortName(p.legFrom)) + ' &amp; ' + esc(shortName(p.legTo)) + (p.stale ? ' · stale GPS' : '');
       div.innerHTML = '<span class="bus">Bus ' + esc(p.bus.name) + '</span>' +
         '<span class="where">' + where + '</span>' +
         '<span class="eta">' + when + '</span>';

@@ -42,27 +42,63 @@ Server-side ETAs are disabled for this Trakk site, so predictions are
 computed in `tracker.js` using **schedule adherence**: each bus is projected
 onto the route loop, matched to the timetable trip it is currently running,
 and its measured earliness/lateness is applied to the published time at your
-stop. A bus staged at the loop terminal is assumed to depart on schedule.
-If the timetable can't be fetched, it falls back to integrating Trakk's
-per-leg scheduled durations from the bus's live position.
+stop. When the timetable can't explain a bus — it is far behind, or running
+a trip the timetable doesn't list (see Caveats) — the live position, driven
+forward at Trakk's per-leg pace, is the answer during service hours.
 
 All schedule reasoning is evaluated **as of the bus's last GPS fix**, never
 wall-clock time: when a tracker goes quiet, elapsed time doesn't count
 against the bus, so the app can never claim a shuttle "already left" without
 a fresh position actually past the stop. A quiet bus reads as "Due —
-awaiting GPS" with its last-seen position and age. Polling speeds up to
+awaiting GPS" with its last-seen position and age. Devices go quiet while
+parked (gaps of up to 14 minutes were recorded during layovers), so a bus
+whose last fix was stopped is kept for 20 minutes instead of 10, and the
+silence counts as the hold continuing. Polling speeds up to
 every 15 s (from 45 s) whenever a bus is within 12 minutes or its pings have
 gone silent, and the Pusher socket uses tight activity timeouts so a dead
 connection is detected within seconds.
 
-Stability rules derived from recorded field GPS traces (July 2026):
+Rules derived from recorded field GPS (July 1 and October 13, 2026):
 
+- **No departure without evidence** — a bus within 120 m past your stop (or
+  stopped up to 250 m past it, or just before it) is *at your stop*,
+  whatever trip it matches, whether that trip has started, and however long
+  it waits; only a fix beyond that zone can make it "gone". Early buses
+  wait at the stop and late ones dwell, and neither is evidence of leaving.
+  The hero says **Here** and never promises a departure time: buses don't
+  wait for the clock at your stops (0 of 25 recorded en-route stops left
+  within 90 s of their timetable time). This holds during service only — a
+  bus parked at the stop midday or after the last run gets the next
+  published time — and a bus already seen driving away stays gone when it
+  stops at the next light, even if its GPS then goes quiet.
+- **Early is early once a bus has left its first stop** — the timetable's
+  "a trip can't run ahead of its start" clamp only applies while the bus is
+  still at or before the trip's first stop. A bus already rolling toward
+  your stop ahead of its slot is shown at its physical arrival (the October
+  13 report: "11 min · 9:31" for a bus a minute away). A bus waiting at the
+  first stop shows a range, its earliest possible arrival to the timetable
+  time ("2–13 min · waiting at Berry & King"), because departures there were
+  seen up to 11 minutes ahead of the timetable.
+- **Waiting is not drifting** — while a bus sits still it keeps its trip
+  match (its "lateness" on its own trip grows a second per second and would
+  otherwise hand it to a later trip that hasn't started), GPS wobble while
+  parked doesn't count as moving backward, and a stopped bus with no history
+  (every fresh app open) gets the earliest reading among the passages it
+  could be on — near Berry at Mission Creek and Fremont & Howard two route
+  passages run within meters of each other. That reading is labeled
+  ("can't tell yet which way it is headed") and re-checked on every fix
+  until the bus moves; only passages within GPS noise (20 m) of the nearest
+  count, so a bus dwelling at 4th at Library isn't read as at Berry.
 - **Trip-match hysteresis** — a bus ~half a headway late scores almost the
   same as "early on the next trip"; the matched trip is kept until a
   challenger wins decisively, so the early/late reading can't flip-flop.
-- **Pre-start clamp** — a bus deadheading toward the terminal before its
-  trip's departure can't be read as "running early"; predictions never beat
-  the published time of a trip that hasn't started.
+- **Pre-start clamp** — a bus deadheading toward the terminal (or parked in
+  the staging lot, which sits on the PM trips' path) before its trip's
+  departure isn't read as "running early" from where it happens to be:
+  until it is seen leaving the trip's first stop, the trip's published time
+  is the *latest* it comes. During service the hero shows a range from the
+  earliest it could physically get to your stop (a bus leaving the lot
+  before its 3:10 PM trip reached Berry at 3:16:47; the timetable said 3:21).
 - **Comebacks are bus-centric** — a bus that passed your stop predicts its
   own next service: drive (at timetable pace) to the next trip's first
   stop, depart at max(published start, arrival there), and carry that
@@ -74,6 +110,14 @@ Stability rules derived from recorded field GPS traces (July 2026):
   near the yard. A bus stationary past a couple of light cycles stops
   being read as "driving, ever later" (which crept the ETA a second per
   second); it pins to its next published departure, labeled "holding".
+- **Wrong-street guard** — leaving Berry at Mission Creek buses drive 50–200 m
+  off the drawn line, closer to the return leg than their own; a projection
+  that would jump kilometers ahead in seconds keeps the bus on its own
+  passage instead (this told 500 Howard riders a bus 20 minutes away had
+  "already passed").
+- **Parked off-route is not in service** — a bus holding in the staging lot
+  (~100 m off the line near Owens St) is listed as parked, never given a
+  countdown, unless it drove the route in the last 10 minutes.
 - **Self-crossing continuity** — the route crosses itself at Fremont &
   Howard ~6 scheduled minutes apart; projection follows the passage
   consistent with the bus's recent motion rather than whichever line is
@@ -112,6 +156,15 @@ just opening it — it fetches fresh data on every open and stays live while
 visible.
 
 ## Caveats
+
+- **The feed's timetable looks out of date.** Trakk's departure data (last
+  updated November 2024 for the PM run) still lists the October 2024 times,
+  while the TMA has since published newer timetables. On October 13, 2026 buses
+  served Berry at Mission Creek at 10:02 and 10:24 and 500 Howard at 10:33 and
+  ~10:52 — up to 40 minutes after the last AM visits the feed lists — and
+  terminal departures ran 9–11 minutes ahead of it. The app therefore trusts
+  live positions over the timetable: estimates are shown up to 45 minutes
+  past a listed visit, and timetable times are labeled as such.
 
 - Unofficial personal tool; the org token comes from the TMA's public embed
   and could change if they re-publish their map. If the page stops working,
