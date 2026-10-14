@@ -868,6 +868,94 @@ async function main() {
       check('bus before its trip start shows earliest-to-timetable range (3:16:47 inside)', p && p.latestSec &&
         p.arrivalSec <= 15 * 3600 + 16 * 60 + 47 && p.latestSec >= 15 * 3600 + 16 * 60 + 47, p && clockOf(p.arrivalSec) + '-' + (p.latestSec ? clockOf(p.latestSec) : '?'));
     }
+    // PM 76084: finished its 3:10 loop and laid over 20 m SHORT of the Nektar
+    // pole (still the trip's last leg by projection) from 3:57; it left at 4:15
+    // and reached Berry at 4:27:56. As a comeback it read "holding · 4:41".
+    {
+      const fixes = {};
+      const L = model.path.length;
+      let p = null;
+      [L - 600, L - 400, L - 200].forEach((rd, k) => {
+        const q = pointAt(rd);
+        const d = at('2026-06-29T15:56:30-07:00'); d.setTime(d.getTime() + k * 10000);
+        T.predictions(model, trips, [mkBus(q.lat, q.lng, 8, d.getTime())], 'work', fixes, d);
+      });
+      const q = pointAt(L - 20);
+      for (let k = 0; k <= 18; k++) {
+        const d = at('2026-06-29T15:57:00-07:00'); d.setTime(d.getTime() + k * 30000);
+        p = T.predictions(model, trips, [mkBus(q.lat, q.lng, 0.3, d.getTime())], 'work', fixes, d)[0];
+      }
+      const came = 16 * 3600 + 27 * 60 + 56;
+      console.log('  terminal-layover:', p && p.method + ' ' + clockOf(p.arrivalSec) + (p.latestSec ? '-' + clockOf(p.latestSec) : '') + (p.waitingAt ? ' waiting at ' + p.waitingAt : ''));
+      check('layover just short of the terminal pole is staged: range covers 4:27:56, never a 4:41 pin', p &&
+        p.method === 'schedule' && p.arrivalSec <= came && (p.latestSec || p.arrivalSec) >= came, p && p.method + ' ' + clockOf(p.arrivalSec));
+    }
+  }
+
+  console.log('\n=== FIELD 2026-10-13 PM: off the drawn return leg (Howard -> 4th St) ===');
+  {
+    // Bus 20024 served 500 Howard at 6:44 PM, then left the drawn return leg
+    // for 4th St: 225-300 m off its own line it crossed the outbound line,
+    // held 2.5 min, and rejoined the drawing at 4th & King. The engine read it
+    // as 760 m past Berry at Mission Creek on the outbound ("7:41-7:46 PM");
+    // it reached Berry at 7:12:42 PM.
+    // pinned to the committed route and timetable the recording was scored
+    // against (a live redraw would shift route distances)
+    const fs = require('fs'), path = require('path');
+    const model = T.buildLoopModel(JSON.parse(fs.readFileSync(path.join(__dirname, 'lts-fresh.json'), 'utf8')));
+    const trips = T.buildTrips(JSON.parse(fs.readFileSync(path.join(__dirname, 'dep-6467db5ea59bbb100741d7b7.json'), 'utf8')), model);
+    const L = model.path.length;
+    const how = model.stops.find(s => s.name.includes('500 Howard St'));
+    const lo = at('2026-10-13T18:40:00-07:00').getTime(), hi = at('2026-10-13T18:59:00-07:00').getTime();
+    const rows = fs.readFileSync(path.join(__dirname, 'field-2026-10-13-pm.jsonl'), 'utf8').trim().split('\n')
+      .map(l => JSON.parse(l)).filter(r => r.name === '20024' && r.when >= lo && r.when <= hi);
+    const fixes = {}, out = [];
+    rows.forEach(r => {
+      const p = T.predictions(model, trips, [mkBus(r.lat, r.lng, r.speed || 0, r.when)], 'work', fixes, new Date(r.when))[0];
+      if (r.when >= at('2026-10-13T18:52:30-07:00').getTime()) out.push(p);
+    });
+    const ret = p => p && T.mod(p.fix.routeDist - how.routeDist, L) < T.mod(model.stops[0].routeDist - how.routeDist, L) + 1;
+    check('a bus detouring off the return leg stays on its own passage', out.length > 30 && out.every(ret),
+      out.filter(p => !ret(p)).length + ' of ' + out.length + ' read elsewhere');
+    const worst = out.length ? Math.max(...out.map(p => p ? p.arrivalSec : Infinity)) : Infinity;
+    check('...and its comeback reads ~7:15, never the 7:22 PM run (7:41+)', worst <= 19 * 3600 + 20 * 60, clockOf(worst));
+  }
+  {
+    // Stuck in traffic 2 km short of the PM terminal past its next run's
+    // departure is not a layover: that run is still the one it makes, late.
+    const q = pointAt(7456);
+    const fixes = {};
+    let p = null;
+    for (let k = 0; k <= 6; k++) {
+      const d = at('2026-06-29T18:49:40-07:00'); d.setTime(d.getTime() + k * 30000);
+      p = T.predictions(model, trips, [mkBus(q.lat, q.lng, 0.3, d.getTime())], 'work', fixes, d)[0];
+    }
+    check('a bus held mid-run keeps the run it can still make (6:52 PM slot, not 7:22)',
+      p && p.method === 'next-trip' && p.arrivalSec < 19 * 3600 + 25 * 60, p && clockOf(p.arrivalSec) + '/' + p.method);
+  }
+
+  console.log('\n=== CODE REVIEW 2026-10-13 PM: passage hold edge cases ===');
+  {
+    const how = stopAt('500 Howard St');
+    const run = (mode, t0, steps) => {
+      const fixes = {}; let p = null;
+      steps.forEach(([rd, v, dt]) => {
+        const q = pointAt(rd), w = at(t0).getTime() + dt * 1000;
+        p = T.predictions(model, trips, [mkBus(q.lat, q.lng, v, w)], mode, fixes, new Date(w + 2000))[0];
+      });
+      return p;
+    };
+    // waiting at the pole, one GPS fix 380 m ahead, then back at the pole
+    const p = run('home', '2026-06-29T16:00:00-07:00', [[how.routeDist - 300, 6, 0], [how.routeDist - 100, 6, 10],
+      [how.routeDist, 0, 20], [how.routeDist, 0, 30], [how.routeDist + 380, 0, 35], [how.routeDist + 5, 0, 40], [how.routeDist + 3, 0, 50]]);
+    check('one GPS spike ahead while waiting at the stop does not leave it "passed"', p && p.method === 'at-stop', p && p.method);
+    // a 2.5-min hold at SF Mission Bay (243 m short of the terminal) at the end
+    // of a PM run is a layover there: named for where it waits
+    const sf = stopAt('SF Mission Bay');
+    const q = run('work', '2026-06-29T15:55:00-07:00', [[sf.routeDist - 300, 7, 0], [sf.routeDist - 100, 7, 10]]
+      .concat(Array.from({ length: 9 }, (_, k) => [sf.routeDist + 5, 0, 30 + k * 20])));
+    check('layover at SF Mission Bay reads waiting at SF Mission Bay, not the terminal', q && q.waitingAt === sf.name,
+      q && q.method + ' ' + q.waitingAt);
   }
 
   console.log('\n' + (failures ? failures + ' FAILURES' : 'ALL CHECKS PASSED'));

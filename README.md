@@ -110,11 +110,26 @@ Rules derived from recorded field GPS (July 1 and October 13, 2026):
   near the yard. A bus stationary past a couple of light cycles stops
   being read as "driving, ever later" (which crept the ETA a second per
   second); it pins to its next published departure, labeled "holding".
+  Only where buses lay over (past the last timed stop before a run's first
+  stop): a bus stuck in traffic mid-loop still makes the run it is late
+  for (stopped 2.5 minutes in traffic 2 km short of the terminal, a bus
+  read as "7:33 PM, holding" at Berry; it came at 7:12). A bus laying over
+  at the stop that ends its run (PM runs end at the terminal they start
+  from) is staged like one waiting at a first stop: a range up to its next
+  timetabled departure, not a pin to it (one parked 20 m short of Nektar
+  read "holding · 4:41" at Berry and was there at 4:28).
 - **Wrong-street guard** — leaving Berry at Mission Creek buses drive 50–200 m
   off the drawn line, closer to the return leg than their own; a projection
   that would jump kilometers ahead in seconds keeps the bus on its own
   passage instead (this told 500 Howard riders a bus 20 minutes away had
-  "already passed").
+  "already passed"). Leaving 500 Howard, buses often head west to 4th St
+  instead of following the drawn return leg, up to ~560 m off it, crossing
+  the outbound line on 3rd St; read as on that line, a bus heading for the
+  terminal was "next run, 7:41 PM" at Berry, where it arrived at 7:12. A bus
+  tracked along its route keeps its own passage up to 600 m off it, until it
+  is seen driving 50 m along another one (parked GPS jitter doesn't count),
+  and one GPS spike ahead while it waits at a stop doesn't move it off the
+  stop.
 - **Parked off-route is not in service** — a bus holding in the staging lot
   (~100 m off the line near Owens St) is listed as parked, never given a
   countdown, unless it drove the route in the last 10 minutes.

@@ -47,6 +47,14 @@
  *                   the bus is AT the stop (arrival..lastNear) or still APPROACHING
  *                   it on this side of the loop. 'soft' = bus 35-120 m past, still
  *                   pulling away (departure not yet confirmed).
+ *                   An "approaching" truth is not evidence when (a) the decoded
+ *                   track segment runs backward around the loop (a real bus never
+ *                   reverses: the bus is on a street the drawn route lacks, decoded
+ *                   onto a parallel passage driven the other way), or (b) the bus is
+ *                   within GPS jitter past the loop anchor (the loop boundary: the
+ *                   engine's "finishing its loop, next run" is the run starting
+ *                   there). Those rows count as HARD only if the bus then really
+ *                   reached the stop more than 3 min sooner than the app said.
  *   ETA ERROR       predicted arrival - actual arrival for evaluations in the
  *                   --window minutes before an actual arrival (+ = engine says later).
  *                   While AT the stop the engine should read ~0 min.
@@ -76,6 +84,12 @@ const ONLY_BUS = argOf('bus', null);
 const R_NEAR = Number(argOf('radius', 35));
 const R_GONE = Number(argOf('gone', 120));
 const WINDOW_SEC = Number(argOf('window', 25)) * 60;
+// unproven "approaching" truths count as FALSE-DEPARTED only when the bus came
+// back this much sooner than the app said (smaller misses are ETA error)
+const FD_SOONER_SEC = 180;
+// GPS jitter at the loop anchor's pole: the boundary between finishing one loop
+// and starting the next (the engine's anchorPastMeters)
+const ANCHOR_POLE_M = 60;
 const LOG = process.argv.includes('--log');
 const JSON_OUT = argOf('json', null);
 
@@ -186,11 +200,43 @@ function decodeTrack(fixes) {
   }
   // unwrap within continuous segments
   let seg = 0, U = pick[0].cand.rd;
-  return fixes.map((f, i) => {
+  const track = fixes.map((f, i) => {
     if (i > 0) {
       if (pick[i].tele) { seg++; U = pick[i].cand.rd; } else U += pick[i].delta;
     }
     return Object.assign({}, f, { rd: pick[i].cand.rd, off: pick[i].cand.d, U, seg, tele: i > 0 && pick[i].tele });
+  });
+  markReversedSegments(track);
+  return track;
+}
+
+// A continuous segment whose decoded progress falls short of how far the bus
+// actually moved (backward, or parked on a vertex while the bus drives off)
+// is a decoding artifact: buses never reverse around the loop. The decoder
+// tolerates small per-fix regressions, so where the bus drives a street the
+// drawn route lacks, parallel to a passage the route uses in the OTHER
+// direction, it teleports onto that passage and creeps backward along it
+// (2026-10-13 PM: every return from 500 Howard down 4th St was decoded as the
+// 3rd St outbound approach "2.5 km before 500 Howard", minutes after the visit).
+const REVERSED_MIN_MOVE = 150, REVERSED_PROGRESS_RATIO = 0.25;
+const REVERSED_WINDOW_SEC = 120;   // ...over this long either side of the fix
+function markReversedSegments(track) {
+  const segs = {};
+  track.forEach(p => (segs[p.seg] = segs[p.seg] || []).push(p));
+  // judged locally, over the fixes within REVERSED_WINDOW_SEC of each one: a
+  // segment that is fine on the approach and only later drives off (to the
+  // yard, say) keeps its approach rows HARD
+  Object.values(segs).forEach(ps => {
+    let lo = 0, hi = 0;
+    ps.forEach((p, i) => {
+      while (ps[lo].when < p.when - REVERSED_WINDOW_SEC * 1000) lo++;
+      while (hi + 1 < ps.length && ps[hi + 1].when <= p.when + REVERSED_WINDOW_SEC * 1000) hi++;
+      if (hi === lo) return;
+      const a = ps[lo], z = ps[hi];
+      let moved = 0;
+      for (let k = lo; k <= hi; k++) moved = Math.max(moved, hav(a.lat, a.lng, ps[k].lat, ps[k].lng));
+      if (moved >= REVERSED_MIN_MOVE && (z.U - a.U) < REVERSED_PROGRESS_RATIO * moved) p.reversed = true;
+    });
   });
 }
 
@@ -289,10 +335,10 @@ function truthAt(track, t) {
   let k = track.length - 1;
   while (k > 0 && track[k].when > t) k--;
   const a = track[k], b = track[k + 1];
-  if (!b || b.seg !== a.seg || t <= a.when) return { rd: a.rd, U: a.U, off: a.off, seg: a.seg };
+  if (!b || b.seg !== a.seg || t <= a.when) return { rd: a.rd, U: a.U, off: a.off, seg: a.seg, reversed: !!a.reversed };
   const f = (t - a.when) / (b.when - a.when);
   const U = a.U + f * (b.U - a.U);
-  return { rd: mod(U, L), U, off: a.off + f * (b.off - a.off), seg: a.seg };
+  return { rd: mod(U, L), U, off: a.off + f * (b.off - a.off), seg: a.seg, reversed: !!a.reversed };
 }
 
 // The loop anchor (first stop) of the service period around time t: PM
@@ -321,6 +367,7 @@ function phaseAt(track, visits, holds, stop, t, lastFixWhen) {
   const tr = truthAt(track, t);
   const o = signedOff(tr.rd, stop.routeDist);
   const ph = { truthRd: Math.round(tr.rd), truthOff: Math.round(tr.off), metersToStop: Math.round(mod(stop.routeDist - tr.rd, L)) };
+  if (tr.reversed) ph.reversedDecode = true;
   const hold = holds.find(h => h.start <= t && t <= (h.leftBy || h.end));
   if (hold) { ph.inHold = true; ph.holdElapsedSec = Math.round((t - hold.start) / 1000); ph.holdWhere = hold.where; ph.holdTotalSec = hold.durSec; }
   if (tr.off > 80) ph.offRoute = true;
@@ -333,6 +380,7 @@ function phaseAt(track, visits, holds, stop, t, lastFixWhen) {
   if (ph.offRoute && hold) return Object.assign(ph, { phase: 'yard/off-route' });
   const anc = anchorAt(sodOf(t));
   const fromAnchor = mod(tr.rd - anc.rd, L), stopFromAnchor = mod(stop.routeDist - anc.rd, L);
+  ph.fromAnchor = Math.round(fromAnchor);
   if (fromAnchor <= 50 && ph.inHold) ph.phase = 'staging'; // still sitting at the anchor
   else if (fromAnchor <= stopFromAnchor) ph.phase = 'approach-leg';
   else if (L - fromAnchor < 600) ph.phase = 'staging';
@@ -361,7 +409,9 @@ function loadTrace(p) {
   // recordings made with the fleet recorder carry every TMA route: keep this one
   // (rows with no route key at all are the older single-route format; a
   // fleet row with route null is a bus not assigned to any route)
-  return rows.filter(r => r && Number.isFinite(r.lat) && Number.isFinite(r.lng) && Number.isFinite(r.when) &&
+  // the app drops no-fix sentinels (lat/lng -404) and anything outside the service
+  // area (extractBuses -> validCoord): the bus keeps its last real fix, aging
+  return rows.filter(r => r && T.validCoord(r.lat, r.lng) && Number.isFinite(r.when) &&
     (!('route' in r) || (r.route && typeof r.route === 'object' ? r.route.id : r.route) === T.CONFIG.routeId));
 }
 
@@ -394,7 +444,15 @@ function evaluate(busName, track, visitsByMode, holds, mode, times) {
     // grading
     if (ph.visit) r.actualArrivalSod = sodOf(ph.visit.arrival);
     if (p && p.method === 'next-trip') {
+      // An "approaching" truth that isn't evidence (see header): count it only if the
+      // bus really came back to the stop clearly sooner than the app's next-loop time.
+      const nextArr = ph.visit ? ph.visit.arrival : ph.extrapolatedArrival;
+      const cameSooner = nextArr !== undefined && sodOf(nextArr) < p.arrivalSec - FD_SOONER_SEC;
+      const unproven = ph.phase === 'approach-leg' && !cameSooner &&
+        (ph.reversedDecode ? 'track decoded backward around the loop' : ph.fromAnchor <= ANCHOR_POLE_M ? ph.fromAnchor + ' m past the loop anchor' : null);
       if (ph.phase === 'at-stop') r.falseDeparted = 'HARD: bus at the stop';
+      else if (unproven) r.fdUnproven = 'next-trip vs approach-leg ' + ph.metersToStop + ' m out, ' + unproven +
+        (nextArr !== undefined ? '; next arrival ' + fmtMin(sodOf(nextArr) - p.arrivalSec) + ' vs app' : '; no arrival in trace');
       else if (ph.phase === 'approach-leg') r.falseDeparted = 'HARD: bus on its approach, ' + ph.metersToStop + ' m to go' + (ph.secToArrival !== undefined ? ', arrives in ' + fmtMin(ph.secToArrival) : '');
       else if (ph.phase === 'staging') r.labelOnly = 'next-loop label while staging ' + ph.metersToStop + ' m out';
       else if (ph.phase === 'pulling-away') r.falseDeparted = 'soft: ' + ph.metersPast + ' m past, departure not yet confirmed';
@@ -459,6 +517,7 @@ function summarize(evals) {
     falseDepartedSoft: all.filter(r => r.falseDeparted && r.falseDeparted.startsWith('soft')).length,
     nextTripAtYard: all.filter(r => r.falseDepartedYard).length,
     nextTripWhileStaging: all.filter(r => r.labelOnly).length,
+    falseDepartedUnproven: all.filter(r => r.fdUnproven).length,
     droppedWhileApproaching: all.filter(r => r.dropped).length,
     phantomYardEta: all.filter(r => r.phantom).length,
     etaScored: err.length,
@@ -480,7 +539,7 @@ function rowLine(r) {
   return `${r.clock} age${String(r.fixAgeSec).padStart(4)}s v${String(r.speed).padStart(4)} | ${r.method.padEnd(14)} arr ${r.arrivalSec !== null ? clockSod(r.arrivalSec) : '--:--:--'} eta ${r.etaSec !== null ? String(Math.round(r.etaSec / 60)).padStart(2) + 'm' : ' - '}` +
     ` trip ${(r.trip || '-').padEnd(8)} dly ${fmtMin(r.delaySec).padStart(6)}${r.holding ? ' HOLDING' : ''}${r.stale ? ' STALE' : ''} engRd ${r.engRd} engHold ${r.engHoldSec}s` +
     ` || truth ${tr.phase}${tr.metersToStop !== undefined ? ' ' + tr.metersToStop + 'm-to-go' : ''}${tr.secToArrival !== undefined ? ' arrIn ' + fmtMin(tr.secToArrival) : ''}${tr.inHold ? ' HOLD+' + tr.holdElapsedSec + 's' : ''} rd ${tr.truthRd}` +
-    `${r.etaErrSec !== undefined ? ' ERR ' + fmtMin(r.etaErrSec) : ''}${r.etaErrSecExtrap !== undefined ? ' ERR~' + fmtMin(r.etaErrSecExtrap) : ''}${r.falseDeparted ? ' **FALSE-DEPARTED ' + r.falseDeparted + '**' : ''}${r.jumpKind ? ' [' + r.jumpKind + ' ' + fmtMin(r.jumpSec) + ']' : ''}`;
+    `${r.etaErrSec !== undefined ? ' ERR ' + fmtMin(r.etaErrSec) : ''}${r.etaErrSecExtrap !== undefined ? ' ERR~' + fmtMin(r.etaErrSecExtrap) : ''}${r.falseDeparted ? ' **FALSE-DEPARTED ' + r.falseDeparted + '**' : ''}${r.fdUnproven ? ' (fd-unproven: ' + r.fdUnproven + ')' : ''}${tr.reversedDecode ? ' REVERSED-DECODE' : ''}${r.jumpKind ? ' [' + r.jumpKind + ' ' + fmtMin(r.jumpSec) + ']' : ''}`;
 }
 
 
@@ -494,6 +553,7 @@ function flagOf(r) {
   if (r.etaErrSec !== undefined && r.etaErrSec < -180) return 'ETA>3min EARLY';
   if (r.etaErrSecExtrap !== undefined && Math.abs(r.etaErrSecExtrap) > 180) return 'ETA~>3min (extrapolated arrival)';
   if (r.labelOnly) return 'next-loop-while-staging';
+  if (r.fdUnproven) return 'next-trip vs unproven approach (not FALSE-DEPARTED)';
   return null;
 }
 function printEpisodes(rows) {
@@ -568,7 +628,7 @@ function main() {
         B.evals[kind][mode] = ev;
         totals[kind].push(ev);
         const s = summarize([ev]);
-        console.log(`  -- [${kind}-replay ${mode}: ${ev.stop}] ${s.evaluations} evals | FALSE-DEPARTED hard ${s.falseDepartedHard} soft ${s.falseDepartedSoft} (yard ${s.nextTripAtYard}) | ETA scored ${s.etaScored}: |err| med ${fmtMin(s.etaAbsMedianSec)} p90 ${fmtMin(s.etaAbsP90Sec)} max ${fmtMin(s.etaAbsMaxSec)} bias ${fmtMin(s.etaMeanSignedSec)} >3min ${s.etaOver3min} (late ${s.etaOver3minLate}/early ${s.etaOver3minEarly}) after-bus-left ${s.saidAfterBusLeft} | at-stop evals ${s.atStopEvals}, eta>2min ${s.atStopEtaOver2min} | jumps ${s.jumps} rollovers ${s.rollovers} | dropped ${s.droppedWhileApproaching}`);
+        console.log(`  -- [${kind}-replay ${mode}: ${ev.stop}] ${s.evaluations} evals | FALSE-DEPARTED hard ${s.falseDepartedHard} soft ${s.falseDepartedSoft} (yard ${s.nextTripAtYard}, unproven ${s.falseDepartedUnproven}) | ETA scored ${s.etaScored}: |err| med ${fmtMin(s.etaAbsMedianSec)} p90 ${fmtMin(s.etaAbsP90Sec)} max ${fmtMin(s.etaAbsMaxSec)} bias ${fmtMin(s.etaMeanSignedSec)} >3min ${s.etaOver3min} (late ${s.etaOver3minLate}/early ${s.etaOver3minEarly}) after-bus-left ${s.saidAfterBusLeft} | at-stop evals ${s.atStopEvals}, eta>2min ${s.atStopEtaOver2min} | jumps ${s.jumps} rollovers ${s.rollovers} | dropped ${s.droppedWhileApproaching}`);
         ev.perVisit.forEach(pv => console.log(`     visit ${pv.arrival}${pv.extrapolated ? ' (extrapolated)' : ''}: ${pv.windowEvals} evals in ${WINDOW_SEC / 60}-min window, |err| med ${fmtMin(pv.absErrMedianSec)} p90 ${fmtMin(pv.absErrP90Sec)}, worst late ${fmtMin(pv.maxLateSec)} / early ${fmtMin(pv.maxEarlySec)}, rider-would-miss ${pv.riderWouldMiss} | at stop: ${pv.atStopMethods || '-'} | pulling away: ${pv.pullingAwayMethods || '-'} | first next-trip ${pv.firstNextTrip || '-'}`));
         if (LOG) { ev.rows.forEach(r => console.log('     ' + rowLine(r))); continue; }
         printEpisodes(ev.rows);

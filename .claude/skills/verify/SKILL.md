@@ -23,6 +23,7 @@ HARNESS_OFFLINE=1 node .claude/skills/verify/harness.js   # force fixtures
 node .claude/skills/verify/scenarios.js      # 23 hold scenarios, warm + cold
 node .claude/skills/verify/groundtruth.js .claude/skills/verify/traces.jsonl
 node .claude/skills/verify/groundtruth.js .claude/skills/verify/field-2026-10-13-am.jsonl
+node .claude/skills/verify/groundtruth.js .claude/skills/verify/field-2026-10-13-pm.jsonl
 node .claude/skills/verify/replay.js         # older stability replay (July traces)
 ```
 
@@ -38,14 +39,24 @@ node .claude/skills/verify/replay.js         # older stability replay (July trac
   "after-bus-left" (rider would miss it). Accepts the fleet recorder's
   all-route files (filters to the TransBay route). `--tracker <path>` scores a
   modified engine copy; `--bus`, `--modes`, `--log`, `--json` narrow/dump.
+  FALSE-DEPARTED hard excludes "unproven" rows (shown as `unproven N`): a
+  next-trip reading where the decoded truth runs backward within ±2 min of
+  the fix (after 500 Howard buses head to 4th St off the drawn return leg,
+  and the decoder puts them on the outbound line) or the bus is within 60 m
+  past the loop anchor — unless the bus then reached the stop 3+ min sooner
+  than the app said. Watch that count too: a real regression could hide
+  there. On the 10-13 PM recording all unproven rows are in its six 4th St
+  detours (1738 15:08, 16:20, 17:57; 20024 18:52; 76084 17:46, 19:31) or at
+  the terminal (1738 18:09, 20024 15:51 and 19:03); none elsewhere.
 - `replay.js` — delay-sign flips / trip changes / arrival jumps. Expected:
   0/0/0 except 66065 at 2/1/2 — one is the 14:56:48 correction when it
   leaves the staging lot (re-read off the lot's passage onto its 3:10 run).
-  Today's ground truth: FALSE-DEPARTED hard 0 in every replay of both
-  recordings.
-- Field recordings: `traces.jsonl` (2026-07-01 PM, 3 buses) and
+  Today's ground truth: FALSE-DEPARTED hard 0 in every replay of all
+  three recordings.
+- Field recordings: `traces.jsonl` (2026-07-01 PM, 3 buses),
   `field-2026-10-13-am.jsonl` (10:00-10:52 AM, all routes; TransBay buses
-  20018, 20024, 76084). Fixtures: `lts-fresh.json`, `dep-*.json` (image URLs
+  20018, 20024, 76084) and `field-2026-10-13-pm.jsonl` (2:31-8:35 PM; 1738,
+  20024, 76084; its `-departures.jsonl` has the same times as the fixture). Fixtures: `lts-fresh.json`, `dep-*.json` (image URLs
   scrubbed, so the two stop-image checks only run live).
 
 ## Page checks (offline simulator)

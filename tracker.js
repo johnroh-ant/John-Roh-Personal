@@ -100,7 +100,18 @@
     teleportMeters: 2500,    // a continuity break implying a jump this far ahead...
     wideContinuityMeters: 220, // ...looks for the bus's own passage this far off the line
                              // (recorded detours run up to 204 m off the drawing past Berry,
-                             // 187 m at Fremont; farther out the bus is on another passage)
+                             // 187 m at Fremont)...
+    jumpConfirmMeters: 50,   // ...and farther out keeps it there until the bus is seen
+                             // DRIVING this far along the other passage: leaving 500
+                             // Howard for 4th St buses run up to ~560 m off the drawn
+                             // return leg and cross the outbound line on the way...
+    detourMeters: 600,       // ...as long as it is within this of its own passage
+    spikeMeters: 500,        // a fix less than this BEHIND the last one, for a bus stopped on
+                             // its route, is GPS noise (one spike ahead, then back), not a
+                             // jump around the loop
+    trackedMs: 1200000,      // "tracked": seen on its drawn line (driving it, or stopped
+                             // on it) within this long — a hold at a stop plus a detour
+                             // must not outlast it
     tripMatch: {
       windowBeforeSec: 15 * 60, // how early a trip is considered active (must not
                                 // exceed maxDelaySec or staged buses fall in a gap)
@@ -220,6 +231,30 @@
       if (!dup) picked.push(c);
     }
     return picked;
+  }
+
+  // Nearest point to pt on the stretch of the path that starts at route
+  // distance `from` and runs `span` meters forward (wrapping around the loop):
+  // the bus's own passage, however far off it the bus is.
+  function projectWithin(path, pt, from, span) {
+    var L = path.length, best = null;
+    from = mod(from, L);
+    for (var i = 0; i + 1 < path.verts.length; i++) {
+      var a = path.verts[i], b = path.verts[i + 1];
+      var s0 = path.cum[i], len = path.cum[i + 1] - s0;
+      if (!(len > 0)) continue;
+      var dx = b.x - a.x, dy = b.y - a.y;
+      var t = ((pt.x - a.x) * dx + (pt.y - a.y) * dy) / (len * len);
+      [from, from - L].forEach(function (lo) { // the stretch may wrap past the terminal
+        var tLo = Math.max(0, (lo - s0) / len), tHi = Math.min(1, (lo + span - s0) / len);
+        if (tLo > tHi) return;
+        var u = Math.max(tLo, Math.min(tHi, t));
+        var ex = pt.x - (a.x + u * dx), ey = pt.y - (a.y + u * dy);
+        var d2 = ex * ex + ey * ey;
+        if (!best || d2 < best.d2) best = { d2: d2, routeDist: s0 + u * len };
+      });
+    }
+    return best;
   }
 
   // Splice geometry corrections into the drawn polyline (see
@@ -486,6 +521,10 @@
       !(prev.regressCount >= CONFIG.regressUnlockCount);
     var pickedByContinuity = false;
     var guarded = false;
+    var jump = null;
+    var advancing = false;
+    // seen on its passage lately (unlike a bus just out of the staging lot)
+    var tracked = usablePrev && prev.trackedAt && bus.when - prev.trackedAt < CONFIG.trackedMs;
     if (usablePrev) {
       var maxAdvance = CONFIG.maxSpeedMps * Math.max(0, (bus.when - prev.when) / 1000) + 250;
       var best = Infinity;
@@ -508,6 +547,9 @@
           regressCount = prev.regressCount || 0;
         } else {
           var picked = mod(pick.routeDist - prev.routeDist + 120, L) - 120;
+          // driving along this passage: progress on it matches the bus's own
+          // speed (one driving across or against a line barely advances on it)
+          advancing = picked > 0 && picked >= 0.5 * (bus.speed || 0) * (bus.when - prev.when) / 1000;
           regressCount = picked < -CONFIG.regressMeters ? (prev.regressCount || 0) + 1
             : picked > CONFIG.regressMeters ? 0            // clear forward progress
               : (prev.regressCount || 0);                  // dwell: hold
@@ -521,8 +563,14 @@
       // loses the bus's own passage and the fallthrough would jump it
       // kilometers ahead. A bus can't do that in under two minutes: look
       // for its own passage in a wider radius first.
+      // (a fix a few hundred meters back for a bus stopped on its route —
+      // after one GPS spike ahead while it waits at a stop — reads as most
+      // of a loop ahead and is no teleport; one starting out of the staging
+      // lot, or moving, that far back is: it projects onto passages behind)
       var nearest = cands[0];
-      if (mod(nearest.routeDist - prev.routeDist, L) > CONFIG.teleportMeters) {
+      var ahead = mod(nearest.routeDist - prev.routeDist, L);
+      var spikeBack = tracked && L - ahead <= CONFIG.spikeMeters && (bus.speed || 0) < CONFIG.parkedSpeedMps;
+      if (ahead > CONFIG.teleportMeters && !spikeBack) {
         var wide = projectCandidates(model.path, toXY(bus.lat, bus.lng), CONFIG.wideContinuityMeters);
         var maxAdv = CONFIG.maxSpeedMps * Math.max(0, (bus.when - prev.when) / 1000) + 250;
         var bestFwd = Infinity;
@@ -535,6 +583,30 @@
           regressCount = prev.regressCount || 0;
           pickedByContinuity = true;
           guarded = true;
+        } else {
+          // Farther off than that (buses leaving 500 Howard for 4th St run
+          // up to ~560 m off the drawn return leg, crossing the outbound
+          // line) the nearest line is a street the bus is crossing, not its
+          // passage. A bus tracked along its route keeps the nearest point of
+          // its own passage it could have reached until it is seen driving
+          // jumpConfirmMeters along the other one; a bus with no route behind
+          // it (just out of the staging lot) takes the nearest as before.
+          var j = prev.jump;
+          var jf = j ? mod(nearest.routeDist - j.routeDist + 120, L) - 120 : null;
+          var samePassage = j && jf >= -120 &&
+            jf <= CONFIG.maxSpeedMps * Math.max(0, (bus.when - j.when) / 1000) + 250;
+          // (only a MOVING fix confirms: parked jitter slides 60-70 m)
+          var confirmed = samePassage && jf >= CONFIG.jumpConfirmMeters &&
+            (bus.speed || 0) >= CONFIG.parkedSpeedMps;
+          var own = !tracked || confirmed ? null
+            : projectWithin(model.path, toXY(bus.lat, bus.lng), prev.routeDist, maxAdv);
+          if (own && Math.sqrt(own.d2) <= CONFIG.detourMeters) {
+            pick = own;
+            regressCount = prev.regressCount || 0;
+            pickedByContinuity = true;
+            guarded = true;
+            jump = samePassage ? j : { routeDist: nearest.routeDist, when: bus.when };
+          }
         }
       }
     }
@@ -550,10 +622,15 @@
       var fit0 = tripFitSec(model, trips, cands[0].routeDist, busSec);
       pick = cands[0];
       var bestAdv = 0;
+      // ...but a bus tracked along its route that reappears on a passage it
+      // could have reached is not re-read by fit onto one it could not have
+      var reachable = function (c) { return mod(c.routeDist - prev.routeDist, L) <= CONFIG.teleportMeters; };
+      var keepReachable = tracked && reachable(cands[0]);
       cands.forEach(function (c, i) {
         if (i === 0) return;
         var d = Math.sqrt(c.d2);
         if (d > d0 * 2 + 30) return;
+        if (keepReachable && !reachable(c)) return;
         var adv = fit0 - tripFitSec(model, trips, c.routeDist, busSec) -
           (d - d0) * CONFIG.fitPerMeterSec - CONFIG.tripMatch.stickySec;
         if (adv > bestAdv) { bestAdv = adv; pick = c; }
@@ -568,6 +645,13 @@
       // held on its own passage by the teleport guard: the bus is somewhere
       // off the drawn line, not at a point on it
       guarded: guarded,
+      // the far passage a guarded hold declined, pending confirmation
+      jump: jump,
+      // last fix that showed the bus on its drawn line: driving forward along
+      // it, or stopped on it (one driving across a line is neither)
+      trackedAt: !pickedByContinuity ? null
+        : !guarded && offBy < CONFIG.atStopOffMeters &&
+          (advancing || (bus.speed || 0) < CONFIG.parkedSpeedMps) ? bus.when : prev.trackedAt || null,
       // no continuity behind this fix (cold open, stale or unlocked prev):
       // the other passages it could be on, for a stop-aware second look
       alts: usablePrev && pickedByContinuity ? null : cands
@@ -651,6 +735,16 @@
     return mod(anchorRd - d, L) < CONFIG.anchorRadiusMeters || mod(d - anchorRd, L) < past;
   }
 
+  // The stop whose pole route distance d is within the stop zone of, or null.
+  function stopNear(model, d) {
+    var L = model.path.length, best = null, bestGap = CONFIG.passedStopGraceMeters;
+    model.stops.forEach(function (s) {
+      var gap = Math.abs(mod(d - s.routeDist + L / 2, L) - L / 2);
+      if (gap < bestGap) { bestGap = gap; best = s; }
+    });
+    return best;
+  }
+
   // The loop anchor (some trip's first stop) route distance d is at, or null.
   function anchorNear(model, trips, d) {
     for (var t = 0; t < trips.length; t++) {
@@ -724,7 +818,9 @@
       var last = t.entries[t.entries.length - 1];
       if (!s0 || !last) return;
       // a parked bus is not running a slot whose departure already passed
-      if (futureOnly && t.startMin * 60 < busSec) return;
+      // -- where buses lay over for it. Stuck in traffic mid-run, it still
+      // has to get there, late.
+      if (futureOnly && t.startMin * 60 < busSec && inLayoverZone(model, t, fix)) return;
       var tEntry = firstEntryFor(model, t, targetIdx);
       if (!tEntry) return;
       var anchorIdx = s0.idx === 0 ? model.stops.length - 1 : s0.idx;
@@ -772,6 +868,18 @@
       anchoredTripStartMin: staged.trip.startMin,
       waitingAt: anchor ? anchor.name : null, departsSec: staged.trip.startMin * 60 + staged.lateBy
     };
+  }
+
+  // Where a bus waits out a layover for a trip: at its first stop, or past
+  // the last timed stop before it (AM: Owens St -> Berry & King; PM: Long
+  // Bridge -> the terminal). Holds elsewhere are traffic, not layovers.
+  function inLayoverZone(model, trip, fix) {
+    var L = model.path.length, s0 = trip.entries[0];
+    if (atAnchor(model, fix.routeDist, s0.routeDist, fix.holdSec)) return true;
+    var toAnchor = mod(s0.routeDist - fix.routeDist, L);
+    return trip.entries.every(function (e) {
+      return sameStop(model, e.idx, s0.idx) || mod(s0.routeDist - e.routeDist, L) > toAnchor;
+    });
   }
 
   // A bus that passed the rider's stop comes back on its own next run when
@@ -903,9 +1011,26 @@
     // wins): a bus merely dwelling at a stop the loop passes through must
     // not be hijacked onto a much later trip anchored there.
     var trusted = best && Math.abs(best.delay) <= CONFIG.tripMatch.maxDelaySec;
-    if (!trusted || best.tau.entryIdx === 0 || best.tau.entryIdx === best.trip.entries.length - 1) {
+    // ...and a bus LAYING OVER (a confirmed hold, not a light) at the anchor
+    // that ends its trip has finished that trip, even parked a few meters
+    // short of the pole, where it still projects into the last leg (PM trips
+    // end at the terminal they start from): it waits for a departure there
+    // like any staged bus. As a comeback it was pinned to the next published
+    // start, and the timetable is stale — 2026-10-13 a bus parked 20 m short
+    // of Nektar read "holding · 4:41" at Berry and left at 4:15 (there 4:28).
+    var lastE = best && best.trip.entries[best.trip.entries.length - 1];
+    var layover = trusted && fix.holdSec >= CONFIG.holdSec &&
+      best.tau.entryIdx === best.trip.entries.length - 2 &&
+      atAnchor(model, fix.routeDist, lastE.routeDist, fix.holdSec);
+    if (!trusted || best.tau.entryIdx === 0 || best.tau.entryIdx === best.trip.entries.length - 1 || layover) {
       var staged = stagedDeparture(model, trips, fix, bus, busSec);
       var stagedRes = staged && stagedResult(model, trips, staged, targetIdx, fix, busSec);
+      // laying over short of the terminal pole (one held at SF Mission Bay,
+      // 243 m before Nektar): name the stop it is actually waiting at
+      if (stagedRes && layover && mod(lastE.routeDist - fix.routeDist, L) > CONFIG.passedStopGraceMeters) {
+        var at = stopNear(model, fix.routeDist);
+        stagedRes.waitingAt = at ? at.name : null;
+      }
       if (stagedRes) return stagedRes;
     }
 
@@ -923,7 +1048,7 @@
       // of its published start is simply early: clamping it to the
       // published time shows an arrival after the bus has come and gone
       // (2026-07-01: left 9 min early, app said 3:21, bus came 3:16:43).
-      var first = trip.entries[0], lastE = trip.entries[trip.entries.length - 1];
+      var first = trip.entries[0]; // (lastE above is this trip's last entry)
       var along = mod(fix.routeDist - first.routeDist, L);
       var span = mod(lastE.routeDist - first.routeDist, L);
       if (span < 1) span = L; // PM trips start and end at the same terminal
@@ -990,7 +1115,10 @@
       // returning on a running one", and both creep the comeback a second
       // per second while the bus sits out its layover.
       var own = nextOwnArrival(model, trips, fix, busSec, targetIdx, parkedHold);
-      return comebackResult(model, trips, fix, busSec, targetIdx, nowSecOfDay, own, parkedHold, {
+      // "holding between runs" only while the run it waits for hasn't left:
+      // a bus stopped in traffic past that departure is just late for it
+      var betweenRuns = parkedHold && !(own && own.tripStartMin * 60 < busSec);
+      return comebackResult(model, trips, fix, busSec, targetIdx, nowSecOfDay, own, betweenRuns, {
         matchedTripStartMin: own && parkedHold ? own.tripStartMin : trip.startMin,
         matchedTauSec: parkedHold ? null : tauSec
       });
@@ -1136,6 +1264,8 @@
           onRouteMovingAt: fix.offBy < CONFIG.atStopOffMeters && (bus.speed || 0) >= CONFIG.parkedSpeedMps
             ? bus.when : (prev ? prev.onRouteMovingAt : null),
           regressCount: fix.regressCount,
+          jump: fix.jump || null,
+          trackedAt: fix.trackedAt || null,
           // keep the trip memory through transient non-matches (one noisy
           // ping must not disarm the hysteresis); the hysteresis gate
           // re-validates it against maxDelaySec every evaluation anyway
@@ -1423,6 +1553,7 @@
     isModeStop: isModeStop,
     extractBuses: extractBuses,
     normalizeDevice: normalizeDevice,
+    validCoord: validCoord,
     busStatus: busStatus,
     applyPing: applyPing,
     locateBus: locateBus,
