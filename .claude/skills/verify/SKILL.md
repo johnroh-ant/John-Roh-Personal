@@ -24,6 +24,8 @@ node .claude/skills/verify/scenarios.js      # 23 hold scenarios, warm + cold
 node .claude/skills/verify/groundtruth.js .claude/skills/verify/traces.jsonl
 node .claude/skills/verify/groundtruth.js .claude/skills/verify/field-2026-10-13-am.jsonl
 node .claude/skills/verify/groundtruth.js .claude/skills/verify/field-2026-10-13-pm.jsonl
+node .claude/skills/verify/groundtruth.js .claude/skills/verify/field-2026-10-14-am.jsonl
+node .claude/skills/verify/groundtruth.js <recording> --cold 60 --tick 0   # fresh app opens
 node .claude/skills/verify/replay.js         # older stability replay (July traces)
 ```
 
@@ -39,6 +41,15 @@ node .claude/skills/verify/replay.js         # older stability replay (July trac
   "after-bus-left" (rider would miss it). Accepts the fleet recorder's
   all-route files (filters to the TransBay route). `--tracker <path>` scores a
   modified engine copy; `--bus`, `--modes`, `--log`, `--json` narrow/dump.
+  `--cold <sec>` adds a `cold-replay`: the engine's history is wiped every
+  `<sec>` seconds, as when the rider opens the app (it re-resolves each bus
+  from one fix). Every replay passes the GPS heading only at the app's
+  ~15 s poll cadence (and on an app open's first fix): the poll carries it,
+  live pings in between don't. The normal replays keep
+  history from the first fix, so they never covered fresh opens: with the
+  app left open FALSE-DEPARTED hard is 0 everywhere, but fresh opens every
+  60 s still give 91 home-mode (500 Howard) false departures across the four
+  recordings (165 before heading was used; 0 at Berry at Mission Creek).
   FALSE-DEPARTED hard excludes "unproven" rows (shown as `unproven N`): a
   next-trip reading where the decoded truth runs backward within ±2 min of
   the fix (after 500 Howard buses head to 4th St off the drawn return leg,
@@ -49,14 +60,17 @@ node .claude/skills/verify/replay.js         # older stability replay (July trac
   detours (1738 15:08, 16:20, 17:57; 20024 18:52; 76084 17:46, 19:31) or at
   the terminal (1738 18:09, 20024 15:51 and 19:03); none elsewhere.
 - `replay.js` — delay-sign flips / trip changes / arrival jumps. Expected:
-  0/0/0 except 66065 at 2/1/2 — one is the 14:56:48 correction when it
+  0/0/0 except 66065 at 2/1/0 — one is the 14:56:48 correction when it
   leaves the staging lot (re-read off the lot's passage onto its 3:10 run).
-  Today's ground truth: FALSE-DEPARTED hard 0 in every replay of all
-  three recordings.
+  Today's ground truth: FALSE-DEPARTED hard 0 in every warm replay of all
+  four recordings.
 - Field recordings: `traces.jsonl` (2026-07-01 PM, 3 buses),
   `field-2026-10-13-am.jsonl` (10:00-10:52 AM, all routes; TransBay buses
   20018, 20024, 76084) and `field-2026-10-13-pm.jsonl` (2:31-8:35 PM; 1738,
-  20024, 76084; its `-departures.jsonl` has the same times as the fixture). Fixtures: `lts-fresh.json`, `dep-*.json` (image URLs
+  20024, 76084; its `-departures.jsonl` has the same times as the fixture)
+  and `field-2026-10-14-am.jsonl` (5:57-11:05 AM, the whole morning service;
+  1738, 20024, 76084 — AM runs leave Berry & King every 20 min at :59/:19/:39,
+  not the feed's 15). Fixtures: `lts-fresh.json`, `dep-*.json` (image URLs
   scrubbed, so the two stop-image checks only run live).
 
 ## Page checks (offline simulator)

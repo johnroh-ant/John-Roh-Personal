@@ -20,6 +20,10 @@
  *   --radius <m>       "at the stop" radius (default 35)
  *   --gone <m>         "departed" = this far past the stop (default 120)
  *   --window <min>     ETA-error window before an actual arrival (default 25)
+ *   --cold <sec>       ALSO replay as fresh app opens: on every fix, with the
+ *                      engine's history wiped every <sec> seconds (a rider
+ *                      opening the app, which re-resolves each bus from one
+ *                      fix with no history); 0 disables (default 0)
  *   --json <path>      write the full structured result here
  *   --log              print every evaluation row
  *
@@ -80,6 +84,8 @@ const depPath = argOf('dep', (() => {
 })());
 const MODES = argOf('modes', 'home,work').split(',');
 const TICK = Number(argOf('tick', 15));
+const COLD = Number(argOf('cold', 0));
+const POLL_SEC = 15;   // the app's live-feed poll cadence near a bus (the only fixes with a GPS course)
 const ONLY_BUS = argOf('bus', null);
 const R_NEAR = Number(argOf('radius', 35));
 const R_GONE = Number(argOf('gone', 120));
@@ -415,7 +421,7 @@ function loadTrace(p) {
     (!('route' in r) || (r.route && typeof r.route === 'object' ? r.route.id : r.route) === T.CONFIG.routeId));
 }
 
-function evaluate(busName, track, visitsByMode, holds, mode, times) {
+function evaluate(busName, track, visitsByMode, holds, mode, times, reopenSec) {
   const stopIdx = T.findStopIndex(model, mode);
   const stop = model.stops[stopIdx];
   const visits = visitsByMode[mode];
@@ -423,10 +429,22 @@ function evaluate(busName, track, visitsByMode, holds, mode, times) {
   const rows = [];
   const lastFixWhen = track[track.length - 1].when;
   let fi = 0;
+  let openedAt = null, lastPollAt = null;
   for (const t of times) {
+    if (reopenSec > 0 && (openedAt === null || t - openedAt >= reopenSec * 1000)) {
+      Object.keys(prevFixes).forEach(k => delete prevFixes[k]); // a fresh app open
+      openedAt = t;
+    }
     while (fi + 1 < track.length && track[fi + 1].when <= t) fi++;
     const f = track[fi];
-    const bus = { id: f.id || busName, name: busName, lat: f.lat, lng: f.lng, speed: f.speed || 0, when: f.when, showOnMap: true };
+    // the fix's GPS course (-1 = none) as the app gets it: on the poll (every
+    // ~15 s while a bus is near; the opening fix of an app open is a poll),
+    // not on the live pings in between
+    const polled = t === openedAt || lastPollAt === null || t - lastPollAt >= POLL_SEC * 1000;
+    if (polled) lastPollAt = t;
+    const course = polled && Number.isFinite(f.heading) && f.heading >= 0 ? f.heading : null;
+    const bus = { id: f.id || busName, name: busName, lat: f.lat, lng: f.lng, speed: f.speed || 0, when: f.when, showOnMap: true,
+      heading: course };
     const p0 = T.predictions(model, trips, [bus], mode, prevFixes, new Date(t))[0] || null;
     // a 'parked' row offers no ETA (bus parked off-route, not in service): score it as no prediction
     const p = p0 && p0.method === 'parked' ? null : p0;
@@ -582,7 +600,7 @@ function main() {
   const byBus = {};
   rows.forEach(r => (byBus[r.name || r.id] = byBus[r.name || r.id] || []).push(r));
   const result = { trace: tracePath, generated: new Date().toISOString(), loopMeters: Math.round(L), buses: {} };
-  const totals = { fix: [], tick: [] };
+  const totals = { fix: [], tick: [], cold: [] };
 
   for (const [name, pts0] of Object.entries(byBus)) {
     if (ONLY_BUS && name !== ONLY_BUS) continue;
@@ -615,16 +633,17 @@ function main() {
       B.visits[mode].forEach(v => console.log(`    arrive ${v.arrival} (prev fix ${v.prevFix})  lastNear ${v.lastNear}  departure ${v.departure}  gone ${v.goneAt}  dwell ${v.dwellSec}s${v.passThrough ? ' PASS-THROUGH' : ''}${v.extrapolated ? ' EXTRAPOLATED (trace ends ' + v.prevFix + ' out)' : ''}  sched ${v.sched} -> ${v.vsSchedMin > 0 ? '+' : ''}${v.vsSchedMin} min`));
     }
 
-    for (const kind of ['fix', 'tick']) {
+    for (const kind of ['fix', 'tick', 'cold']) {
       if (kind === 'tick' && !(TICK > 0)) continue;
-      const times = kind === 'fix' ? pts.map(p => p.when) : (() => {
+      if (kind === 'cold' && !(COLD > 0)) continue;
+      const times = kind !== 'tick' ? pts.map(p => p.when) : (() => {
         const out = [];
         for (let t = pts[0].when; t <= pts[pts.length - 1].when; t += TICK * 1000) out.push(t);
         return out;
       })();
       B.evals[kind] = {};
       for (const mode of MODES) {
-        const ev = evaluate(name, track, visitsByMode, holds, mode, times);
+        const ev = evaluate(name, track, visitsByMode, holds, mode, times, kind === 'cold' ? COLD : 0);
         B.evals[kind][mode] = ev;
         totals[kind].push(ev);
         const s = summarize([ev]);

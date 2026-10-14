@@ -84,13 +84,19 @@ async function main() {
   const at = iso => new Date(iso);
 
   {
-    // 1. Bus idle at Nektar terminal at 15:25 -> departs 15:30 trip, 500 Howard @ 15:59
+    // 1. Bus idle at Nektar terminal at 15:25 -> departs 15:30 trip, 500 Howard @ 15:59.
+    //    Staged at its first stop it reads earliest..timetable: it could leave
+    //    now and make the printed 29-min run (Trakk's legs say 34 min, slower
+    //    than 12 of 14 recorded morning runs Berry & King -> 500 Howard).
     const nek = stopAt('Nektar');
     const d = at('2026-06-29T15:25:00-07:00');
     const preds = T.predictions(model, trips, [mkBus(nek.lat, nek.lng, 0, d.getTime())], 'home', {}, d);
     const p = preds[0];
-    console.log('  terminal-hold:', p && p.etaMin + 'min arr ' + clockOf(p.arrivalSec) + ' method ' + p.method);
-    check('terminal hold uses 15:59 arrival (34min)', p && Math.abs(p.etaMin - 34) <= 1, p && p.etaMin);
+    console.log('  terminal-hold:', p && p.etaMin + 'min arr ' + clockOf(p.arrivalSec) +
+      (p && p.latestSec ? '..' + clockOf(p.latestSec) : '') + ' method ' + p.method);
+    check('terminal hold: 15:59 is the latest, the printed 29-min run the earliest',
+      p && Math.abs((p.latestSec || p.arrivalSec) - (15 * 3600 + 59 * 60)) < 60 && Math.abs(p.etaMin - 29) <= 1,
+      p && p.etaMin + 'min..' + clockOf(p.latestSec || p.arrivalSec));
   }
   {
     // 2. Bus at Mission & Spear moving, 07:55 AM. The 7:39-start trip is
@@ -601,17 +607,20 @@ async function main() {
     for (let k = 0; k <= 12; k++) {
       const d = new Date(t0 + k * 30000);
       const p = T.predictions(model, trips, [mkParked(1700 + (k % 2), d.getTime())], 'work', fixes, d)[0];
-      if (p) arrivals.push({ t: k * 30, arr: p.arrivalSec, method: p.method, holding: p.holding });
+      if (p) arrivals.push({ t: k * 30, arr: p.arrivalSec, latest: p.latestSec || p.arrivalSec, method: p.method, holding: p.holding });
     }
     const early = arrivals[1], late = arrivals[arrivals.length - 1];
     const held = arrivals.filter(a => a.t >= 180); // hold confirmed by 150s
     console.log('  layover-hold: t=30s ' + clockOf(early.arr) + '/' + early.method +
-      '  t=' + late.t + 's ' + clockOf(late.arr) + '/' + late.method + (late.holding ? ' HOLDING' : ''));
-    check('confirmed hold pins the arrival to the next future run (9:56)',
-      held.length && held.every(a => Math.abs(a.arr - (9 * 3600 + 56 * 60)) < 90),
-      held.map(a => a.t + 's:' + clockOf(a.arr)).join(' '));
-    const spread = Math.max(...held.map(a => a.arr)) - Math.min(...held.map(a => a.arr));
-    check('no per-second creep once holding', spread < 60, spread + 's spread');
+      '  t=' + late.t + 's ' + clockOf(late.arr) + '..' + clockOf(late.latest) + '/' + late.method + (late.holding ? ' HOLDING' : ''));
+    // Laid over where runs end (AM: past Owens St) it is staged like a bus at
+    // Berry & King: the next future run (9:56) is the LATEST it comes, not a
+    // pin -- 2026-10-14 one held at Owens was pinned to 9:56 and came at 9:40.
+    check('confirmed hold: the next future run (9:56) is the latest it comes',
+      held.length && held.every(a => Math.abs(a.latest - (9 * 3600 + 56 * 60)) < 90 && a.arr <= a.latest),
+      held.map(a => a.t + 's:' + clockOf(a.arr) + '..' + clockOf(a.latest)).join(' '));
+    const spread = Math.max(...held.map(a => a.latest)) - Math.min(...held.map(a => a.latest));
+    check('no per-second creep of the timetable end once holding', spread < 60, spread + 's spread');
   }
   {
     // A brief pause (one light cycle) must NOT reroute a genuinely late,
@@ -640,9 +649,10 @@ async function main() {
       const d = new Date(t0 + k * 45000);
       p = T.predictions(model, trips, [mkBus(pt.lat, pt.lng, 0.3, busWhen)], 'work', fixes, d)[0];
     }
-    console.log('  hold-carry:', p && clockOf(p.arrivalSec) + '/' + p.method + (p.holding ? ' HOLDING' : ''));
+    console.log('  hold-carry:', p && clockOf(p.arrivalSec) + (p.latestSec ? '..' + clockOf(p.latestSec) : '') +
+      '/' + p.method + (p.holding ? ' HOLDING' : ''));
     check('render ticks between pings do not reset the hold',
-      p && p.holding && Math.abs(p.arrivalSec - (9 * 3600 + 56 * 60)) < 90, p && clockOf(p.arrivalSec));
+      p && p.latestSec && Math.abs(p.latestSec - (9 * 3600 + 56 * 60)) < 90, p && clockOf(p.latestSec || p.arrivalSec));
   }
 
   {
@@ -934,6 +944,53 @@ async function main() {
       p && p.method === 'next-trip' && p.arrivalSec < 19 * 3600 + 25 * 60, p && clockOf(p.arrivalSec) + '/' + p.method);
   }
 
+  console.log('\n=== FIELD 2026-10-14 AM: never a time after the bus came ===');
+  {
+    // Replays of the recording (committed route and timetable): each window
+    // ends before the bus reached the stop, and no reading may be later than
+    // when it got there. The timetable is stale (the AM runs left Berry & King
+    // every 20 min, at :19/:39/:59; the feed lists one every 15 min to 8:39,
+    // then 9:05, 9:29, 9:54), so a bus between runs has only a range.
+    const fs = require('fs'), path = require('path');
+    const model = T.buildLoopModel(JSON.parse(fs.readFileSync(path.join(__dirname, 'lts-fresh.json'), 'utf8')));
+    const trips = T.buildTrips(JSON.parse(fs.readFileSync(path.join(__dirname, 'dep-6467db5ea59bbb100741d7b7.json'), 'utf8')), model);
+    const all = fs.readFileSync(path.join(__dirname, 'field-2026-10-14-am.jsonl'), 'utf8').trim().split('\n')
+      .map(l => JSON.parse(l)).filter(r => r.route === T.CONFIG.routeId && T.validCoord(r.lat, r.lng));
+    const replay = (bus, mode, from, to) => {
+      const lo = at('2026-10-14T' + from + '-07:00').getTime(), hi = at('2026-10-14T' + to + '-07:00').getTime();
+      const fixes = {}, out = [];
+      all.filter(r => r.name === bus && r.when <= hi).forEach(r => {
+        const p = T.predictions(model, trips, [mkBus(r.lat, r.lng, r.speed || 0, r.when)], mode, fixes, new Date(r.when))[0];
+        if (r.when >= lo && p) out.push(p);
+      });
+      return out;
+    };
+    const sod = hms => { const [h, m, x] = hms.split(':').map(Number); return h * 3600 + m * 60 + x; };
+    const late = (out, came) => out.filter(p => p.arrivalSec > sod(came));
+    [
+      // laid over at Owens St 9:25-9:34 (where AM runs end) after the 9:29 slot
+      // passed: "holding · 9:56" at Berry at Mission Creek; it came 9:40:53
+      ['1738', 'work', '09:25:00', '09:34:05', '09:40:53', 'held at Owens St, its run\'s slot passed'],
+      // driving from the Owens layover to Berry & King before the 6:19 run, no
+      // trip to match yet: Trakk legs alone said 6:43 at 500 Howard; there 6:38:52
+      ['76084', 'home', '06:14:00', '06:17:15', '06:38:52', 'out of the layover before its run'],
+      // stopped 45 s at the Berry & King pole running 6 min late: staged for the
+      // next run with Trakk's 26-min legs as the earliest (7:25); there 7:19:39
+      ['20024', 'home', '06:58:00', '07:00:20', '07:19:39', 'a brief stop at Berry & King'],
+      // left Berry & King 4 min ahead of the 7:24 run; one moving fix at the pole
+      // read as its last loop dropped "seen at the anchor", and past Berry at
+      // Mission Creek the run was clamped back to 7:42; there 7:40:33
+      ['76084', 'home', '07:16:30', '07:24:05', '07:40:33', 'a run that left early stays early']
+    ].forEach(([bus, mode, from, to, came, what]) => {
+      const out = replay(bus, mode, from, to), bad = late(out, came);
+      check(what + ': never after ' + came + ' (bus ' + bus + ', ' + mode + ')', out.length > 5 && !bad.length,
+        bad.length + ' of ' + out.length + ' later' + (bad.length ? ', worst ' + clockOf(Math.max(...bad.map(p => p.arrivalSec))) : ''));
+    });
+    const gone = replay('76084', 'home', '07:19:40', '07:24:05').filter(p => p.beforeRun || p.latestSec);
+    check('...read as running early once it has left, never "its run hasn\'t started"', !gone.length,
+      gone.length + ' readings clamped to the 7:24 run');
+  }
+
   console.log('\n=== CODE REVIEW 2026-10-13 PM: passage hold edge cases ===');
   {
     const how = stopAt('500 Howard St');
@@ -956,6 +1013,27 @@ async function main() {
       .concat(Array.from({ length: 9 }, (_, k) => [sf.routeDist + 5, 0, 30 + k * 20])));
     check('layover at SF Mission Bay reads waiting at SF Mission Bay, not the terminal', q && q.waitingAt === sf.name,
       q && q.method + ' ' + q.waitingAt);
+  }
+
+  console.log('\n=== FIELD 2026-10-14 AM: fresh app open, GPS course ===');
+  {
+    // Bus 20024 on its way to 500 Howard (there 8:22:18). Opening the app at
+    // 8:11:15 with no history, the nearest drawn line is the return leg: it
+    // read "already passed · next loop 8:54". Its GPS course (56°, 9 m/s)
+    // runs along the outbound passage instead.
+    const fs = require('fs'), path = require('path');
+    const fxModel = T.buildLoopModel(JSON.parse(fs.readFileSync(path.join(__dirname, 'lts-fresh.json'), 'utf8')));
+    const fxTrips = T.buildTrips(JSON.parse(fs.readFileSync(path.join(__dirname, 'dep-6467db5ea59bbb100741d7b7.json'), 'utf8')), fxModel);
+    const r = fs.readFileSync(path.join(__dirname, 'field-2026-10-14-am.jsonl'), 'utf8').trim().split('\n').map(l => JSON.parse(l))
+      .find(x => x.name === '20024' && Math.floor(x.when / 1000) === at('2026-10-14T08:11:15-07:00').getTime() / 1000);
+    const open = heading => r && T.predictions(fxModel, fxTrips, [Object.assign(mkBus(r.lat, r.lng, r.speed, r.when), { heading })],
+      'home', {}, new Date(r.when + 2000))[0];
+    const withCourse = open(r && r.heading), without = open(null);
+    console.log('  fresh open 8:11:15:', without && without.method, '->', withCourse && withCourse.method + ' ' + clockOf(withCourse.arrivalSec));
+    check('fresh open: a bus on its way is not "already passed" when its course runs along its passage',
+      withCourse && withCourse.method !== 'next-trip' && withCourse.arrivalSec <= 8 * 3600 + 22 * 60 + 18, withCourse && withCourse.method);
+    check('...(without the course this fix reads passed: the check exercises the heading rule)', without && without.method === 'next-trip',
+      without && without.method);
   }
 
   console.log('\n' + (failures ? failures + ' FAILURES' : 'ALL CHECKS PASSED'));

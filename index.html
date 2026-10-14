@@ -475,7 +475,7 @@
         els.heroBig.textContent = top.ambiguous ? 'Near' : top.justPast ? 'Just past' : 'Here';
         els.heroBig.className = top.stale ? 'big dim' : 'big';
         els.heroArrive.textContent = top.ambiguous
-          ? bus + ' is stopped ~' + Math.round((top.poleMeters || 0) / 10) * 10 + ' m from your stop'
+          ? bus + (top.stopped ? ' is stopped ~' : ' is ~') + Math.round((top.poleMeters || 0) / 10) * 10 + ' m from your stop'
           : top.justPast ? bus + ' is stopped just past your stop'
           : top.stale ? bus + ' · at your stop when last seen' : bus + ' is at your stop';
         els.heroDetail.textContent = top.ambiguous
@@ -578,7 +578,7 @@
         : p.latestSec ? p.etaMin + '–' + Math.round((p.latestSec - (p.arrivalSec - p.etaSec)) / 60) + ' min'
         : p.etaMin + ' min <small>~' + fmtClockSec(p.arrivalSec) + '</small>';
       var where = p.method === 'parked' ? 'parked off-route · not in service'
-        : p.method === 'at-stop' ? (p.ambiguous ? 'stopped near your stop' : p.justPast ? 'stopped just past your stop' : 'at your stop')
+        : p.method === 'at-stop' ? (p.ambiguous ? (p.stopped ? 'stopped near your stop' : 'near your stop') : p.justPast ? 'stopped just past your stop' : 'at your stop')
         : p.method === 'scheduled-only' ? 'parked between service periods'
         : p.method === 'next-trip' ? (p.holding
           ? 'holding' + (p.tripStartMin != null ? ' · next run ' + T.fmtClock(p.tripStartMin) : '')

@@ -70,6 +70,11 @@
                                 // only within GPS noise of it: the outbound dwell past Berry
                                 // wanders up to ~15 m toward the return line, while the 4th
                                 // at Library pole (return leg) is 25 m from the outbound line
+    courseKeepMs: 30000,     // a polled GPS course stands in for the heading-less live
+                             // pings that follow it for this long
+    headingMinSpeedMps: 3,   // a GPS course is trusted from this speed up (slower, it swings
+                             // through corners: 0.2-1.3% of fixes >= 3 m/s ran > 100 deg off
+                             // their decoded passage, all at turns or decode errors)
     garageMeters: 1500,      // beyond this from the route, a fix predicts nothing
     fitPerMeterSec: 0.6,     // exchange rate between distance and schedule-fit
                              // evidence when resolving an ambiguous passage: a
@@ -257,6 +262,22 @@
     return best;
   }
 
+  // Compass bearing (deg, clockwise from north) of the drawn line at route
+  // distance rd, smoothed over +-15 m.
+  function pathBearing(path, rd) {
+    var at = function (d) {
+      d = mod(d, path.length);
+      var i = 0;
+      while (i + 2 < path.cum.length && path.cum[i + 1] <= d) i++;
+      var a = path.verts[i], b = path.verts[i + 1], seg = path.cum[i + 1] - path.cum[i];
+      var t = seg > 0 ? (d - path.cum[i]) / seg : 0;
+      return { x: a.x + t * (b.x - a.x), y: a.y + t * (b.y - a.y) };
+    };
+    var a = at(rd - 15), b = at(rd + 15);
+    return mod(Math.atan2(b.x - a.x, b.y - a.y) * 180 / Math.PI, 360);
+  }
+  function bearingGap(a, b) { var d = mod(a - b, 360); return d > 180 ? 360 - d : d; }
+
   // Splice geometry corrections into the drawn polyline (see
   // CONFIG.geometryPatches). Anchors must land within 120 m of an existing
   // vertex or the patch is skipped as no longer applicable.
@@ -422,6 +443,8 @@
         name: b.name,
         lat: b.lat, lng: b.lng,
         speed: b.speed || 0,
+        // GPS course of this fix (the feed sends -1 when it has none)
+        heading: Number.isFinite(b.heading) && b.heading >= 0 && b.heading <= 360 ? b.heading : null,
         // clamp clock skew: a future timestamp would otherwise pin the bus
         // as eternally fresh and outvote every later update
         when: Math.min(b.when, Date.now() + 5000),
@@ -447,6 +470,8 @@
     var now = Date.now();
     bus.lat = ping.l[0];
     bus.lng = ping.l[1];
+    // the course the last poll sent belongs to that fix, not this one
+    bus.heading = null;
     if (Number.isFinite(ping.s)) bus.speed = ping.s;
     // an accepted ping always freshens the fix; fall back to receipt time
     // and clamp device clock skew (see extractBuses)
@@ -654,7 +679,9 @@
           (advancing || (bus.speed || 0) < CONFIG.parkedSpeedMps) ? bus.when : prev.trackedAt || null,
       // no continuity behind this fix (cold open, stale or unlocked prev):
       // the other passages it could be on, for a stop-aware second look
-      alts: usablePrev && pickedByContinuity ? null : cands
+      alts: usablePrev && pickedByContinuity ? null : cands,
+      // no usable history at all (fresh open, unresolved, stale or unlocked)
+      cold: !usablePrev
     };
   }
 
@@ -691,6 +718,34 @@
       secs += model.stops[i].legDur;
     }
     return secs;
+  }
+
+  /*
+   * The soonest a bus at route distance busDist can be at targetIdx if it
+   * drove there now: Trakk's leg durations, but no slower than the trip's
+   * own printed time from its first stop to the target. Trakk's legs run far
+   * slower than real morning buses (Berry & King -> 500 Howard: 25.8 min of
+   * legs, 18 printed, 17.4-30.5 recorded on 2026-10-14, 12 of 14 runs under
+   * 25.8), so as the EARLY end of a range they were later than the bus.
+   */
+  function earliestEtaSeconds(model, trip, busDist, targetIdx) {
+    var eta = etaSeconds(model, busDist, targetIdx);
+    var s0 = trip && trip.entries[0];
+    var e = s0 && firstEntryFor(model, trip, targetIdx);
+    if (!e) return eta;
+    var L = model.path.length;
+    var printed = (e.min - s0.min) * 60;
+    var legs = etaSeconds(model, mod(s0.routeDist + 1, L), targetIdx);
+    if (!(printed > 0) || legs <= printed) return eta;
+    // still short of the run's first stop (in the staging lot, or past
+    // Owens St): the drive there is not part of the printed run — Trakk
+    // pace to it, printed pace after it
+    var toFirst = mod(s0.routeDist - busDist, L);
+    if (toFirst > 1 && toFirst < mod(model.stops[targetIdx].routeDist - busDist, L)) {
+      var s0Idx = s0.idx === 0 ? model.stops.length - 1 : s0.idx;
+      return etaSeconds(model, busDist, s0Idx) + printed;
+    }
+    return eta * printed / legs;
   }
 
   function distanceAlong(model, fromDist, targetIdx) {
@@ -840,10 +895,28 @@
       if (lateBy > CONFIG.tripMatch.maxDelaySec) return;
       var arrival = tEntry.min * 60 + lateBy;
       if (!best || arrival < best.arrivalSec) {
-        best = { arrivalSec: arrival, tripStartMin: t.startMin };
+        best = { arrivalSec: arrival, tripStartMin: t.startMin, trip: t };
       }
     });
     return best;
+  }
+
+  // The next run a bus in its layover zone is heading for (it waits for, or
+  // drives to, that run's first stop) — one starting within the trip-match
+  // window, not the next service period's: {trip, lateBy} like stagedDeparture.
+  function runAhead(model, trips, fix, busSec) {
+    var run = null;
+    trips.forEach(function (t) {
+      if (!t.entries[0] || t.startMin * 60 < busSec - CONFIG.stagedGraceSec ||
+          t.startMin * 60 > busSec + CONFIG.tripMatch.windowBeforeSec) return;
+      if (!inLayoverZone(model, t, fix)) return;
+      if (!run || t.startMin < run.startMin) run = t;
+    });
+    if (!run) return null;
+    // late by however long it takes to get to the run's first stop from here
+    var s0Idx = run.entries[0].idx === 0 ? model.stops.length - 1 : run.entries[0].idx;
+    var reach = busSec + etaSeconds(model, fix.routeDist, s0Idx);
+    return { trip: run, lateBy: Math.max(0, reach - run.startMin * 60) };
   }
 
   // Prediction for a bus staged at a trip's first stop: it leaves at the
@@ -860,7 +933,7 @@
     // timetable time is the latest. Before the period's first departure there
     // is nothing to leave early for.
     var earliest = inService(trips, busSec)
-      ? Math.min(timetabled, busSec + etaSeconds(model, fix.routeDist, targetIdx)) : timetabled;
+      ? Math.min(timetabled, busSec + earliestEtaSeconds(model, staged.trip, fix.routeDist, targetIdx)) : timetabled;
     return {
       arrivalSec: earliest, latestSec: timetabled > earliest + 90 ? timetabled : null,
       delaySec: staged.lateBy, method: 'schedule',
@@ -1090,8 +1163,9 @@
         // Before its trip starts the timetable is only the latest it comes,
         // as for a staged bus: the feed's timetable is stale (departures seen
         // 9-11 min ahead of it), and once service runs it can go any time.
-        var earliest = busSec + etaSeconds(model, fix.routeDist, targetIdx);
-        if (preStart && inService(trips, busSec) && earliest < arrivalSec - 90) {
+        var earliest = preStart && inService(trips, busSec) &&
+          busSec + earliestEtaSeconds(model, trip, fix.routeDist, targetIdx);
+        if (earliest && earliest < arrivalSec - 90) {
           r.arrivalSec = earliest;
           r.latestSec = arrivalSec;
           r.beforeRun = true;
@@ -1118,6 +1192,29 @@
       // "holding between runs" only while the run it waits for hasn't left:
       // a bus stopped in traffic past that departure is just late for it
       var betweenRuns = parkedHold && !(own && own.tripStartMin * 60 < busSec);
+      // Laying over during service where buses wait for their next run (AM:
+      // past Owens St, where AM runs end, the last timed stop before Berry &
+      // King) it is staged like a bus at the run's first stop: the published
+      // start is the LATEST it leaves, not a pin. The timetable is stale —
+      // 2026-10-14 a bus held at Owens read "holding · 9:56" at Berry at
+      // Mission Creek and was there 9:40.
+      // (a run of this service period — a bus laid up after the last morning
+      // run is not waiting for the afternoon's)
+      var ownTrip = betweenRuns && own && own.trip && inService(trips, busSec) &&
+        own.trip.startMin * 60 - busSec <= CONFIG.serviceTailSec ? own.trip : null;
+      var ownEntry = ownTrip && inLayoverZone(model, ownTrip, fix) && firstEntryFor(model, ownTrip, targetIdx);
+      if (ownEntry) {
+        var waitRes = stagedResult(model, trips,
+          { trip: ownTrip, lateBy: Math.max(0, own.arrivalSec - ownEntry.min * 60) }, targetIdx, fix, busSec);
+        if (waitRes && !atAnchor(model, fix.routeDist, ownTrip.entries[0].routeDist, fix.holdSec)) {
+          // not at the run's first stop: name where it waits, and don't
+          // remember it as seen staged there
+          var near = stopNear(model, fix.routeDist);
+          waitRes.waitingAt = near ? near.name : null;
+          waitRes.anchoredTripStartMin = null;
+        }
+        if (waitRes) return waitRes;
+      }
       return comebackResult(model, trips, fix, busSec, targetIdx, nowSecOfDay, own, betweenRuns, {
         matchedTripStartMin: own && parkedHold ? own.tripStartMin : trip.startMin,
         matchedTauSec: parkedHold ? null : tauSec
@@ -1131,6 +1228,22 @@
       // to stage for leaves whenever its driver does. Outside service
       // (pre-service / midday deadhead), the position would beat every
       // published arrival, so the next published trip is the answer.
+      // ...but a bus on its way to a run's first stop before that run starts
+      // (out of the AM layover past Owens St toward Berry & King) has no trip
+      // to match yet — every run reads that stretch as the tail of its loop —
+      // and is the run's pre-start case: the published time is the latest it
+      // comes, the soonest it could get there the earliest (2026-10-14, Trakk
+      // legs alone said 6:43 at 500 Howard for a bus there 6:38).
+      var run = inService(trips, busSec) && runAhead(model, trips, fix, busSec);
+      var pre = run && stagedResult(model, trips, run, targetIdx, fix, busSec);
+      if (pre) {
+        var atRun = atAnchor(model, fix.routeDist, run.trip.entries[0].routeDist, fix.holdSec);
+        var stop = stopped && !atRun ? stopNear(model, fix.routeDist) : null;
+        pre.waitingAt = !stopped ? null : atRun ? pre.waitingAt : stop ? stop.name : null;
+        if (!atRun) pre.anchoredTripStartMin = null;
+        pre.beforeRun = !!pre.latestSec && busSec < run.trip.startMin * 60;
+        return pre;
+      }
       var anchor = stopped ? anchorNear(model, trips, fix.routeDist) : null;
       var legsArrival = busSec + etaSeconds(model, fix.routeDist, targetIdx);
       if (inService(trips, busSec) && plausibleArrival(model, trips, targetIdx, legsArrival)) {
@@ -1165,8 +1278,55 @@
   // (the caller must not continue from this fix's passage).
   function earliestPlausible(model, trips, fix, bus, targetIdx, nowSecOfDay, fixSecOfDay, prev) {
     var best = { p: predictBus(model, trips, fix, bus, targetIdx, nowSecOfDay, fixSecOfDay, prev), fix: fix, contested: false };
-    if (!fix.alts || (bus.speed || 0) >= CONFIG.parkedSpeedMps) return best;
+    if (!fix.alts) return best;
     var d0 = Math.sqrt(fix.alts[0].d2);
+    var rank = function (r) { return r && r.arrivalSec != null ? r.arrivalSec : Infinity; };
+    // the reading on each candidate passage, kept when it is EARLIER
+    var tryPassages = function (cands) {
+      cands.forEach(function (c) {
+        var d = Math.sqrt(c.d2);
+        var alt = Object.assign({}, fix, { routeDist: c.routeDist, offBy: d, offRoute: d > CONFIG.offRouteMeters });
+        var q = predictBus(model, trips, alt, bus, targetIdx, nowSecOfDay, fixSecOfDay, prev);
+        if (rank(q) < rank(best.p)) { best.p = q; best.fix = alt; }
+      });
+    };
+    if ((bus.speed || 0) >= CONFIG.parkedSpeedMps) {
+      // A MOVING bus with no history (a fresh open) drives along its passage:
+      // where the one picked runs across or against the fix's GPS course and
+      // another distance-plausible one runs with it, that one is evidence
+      // too. On 4th St by Berry at Mission Creek and on 3rd St short of 500
+      // Howard the outbound and return legs share streets the drawing lacks,
+      // and a fresh open read a bus on its way as "already passed your stop"
+      // (2026-10-14: "next loop 8:54" at 500 Howard for a bus there at 8:22).
+      // Mid-turn (a bus cutting from Fremont onto Howard still heads up
+      // Fremont) the course can mislead, so it only ever moves a reading
+      // EARLIER — and for a bus with history, only to a passage it could
+      // have reached from its last position.
+      var hdg = (bus.speed || 0) >= CONFIG.headingMinSpeedMps && Number.isFinite(bus.heading) &&
+        bus.heading >= 0 && bus.heading <= 360 ? bus.heading : null;
+      if (hdg === null || bearingGap(pathBearing(model.path, fix.routeDist), hdg) <= 75) return best;
+      var L = model.path.length;
+      var aligned = fix.alts.filter(function (c) {
+        return c.routeDist !== fix.routeDist && Math.sqrt(c.d2) <= d0 * 2 + 30 &&
+          bearingGap(pathBearing(model.path, c.routeDist), hdg) <= 45 &&
+          (fix.cold || !prev || mod(c.routeDist - prev.routeDist, L) <= CONFIG.teleportMeters);
+      });
+      if (!aligned.length) return best;
+      if (best.p && best.p.method === 'at-stop') {
+        // "at the stop" on a passage the bus is driving against: don't vouch
+        // for it — say it can't tell yet, and re-resolve on the next fix
+        // rather than continue from it (a return-leg bus passing 4th at
+        // Library read "Here", then "already passed" 30 min before it came)
+        best.p.ambiguous = true;
+        best.contested = true;
+        return best;
+      }
+      // (a swap the course supports is continued from: re-resolving every
+      // fix instead let heading-less pings fall back to the wrong passage —
+      // fresh opens on four recordings, 81 vs 131 false departures)
+      tryPassages(aligned);
+      return best;
+    }
     var others = fix.alts.filter(function (c) {
       var d = Math.sqrt(c.d2);
       return c.routeDist !== fix.routeDist && d <= d0 + CONFIG.passageNoiseMeters && d <= CONFIG.offRouteMeters;
@@ -1174,12 +1334,7 @@
     best.contested = others.length > 0;
     // already at the stop: no other passage reads sooner
     if (best.p && best.p.method === 'at-stop') return best;
-    var rank = function (r) { return r && r.arrivalSec != null ? r.arrivalSec : Infinity; };
-    others.forEach(function (c) {
-      var alt = Object.assign({}, fix, { routeDist: c.routeDist, offBy: Math.sqrt(c.d2), offRoute: false });
-      var q = predictBus(model, trips, alt, bus, targetIdx, nowSecOfDay, fixSecOfDay, prev);
-      if (rank(q) < rank(best.p)) { best.p = q; best.fix = alt; }
-    });
+    tryPassages(others);
     // the reading rests on the benefit of the doubt, not on the evidence
     if (best.fix !== fix && best.p) best.p.ambiguous = true;
     return best;
@@ -1252,14 +1407,19 @@
         ? Math.max(0, ((parkedNow ? now.getTime() : bus.when) - holdSince) / 1000) : 0;
       // ...and the part of it the bus's own fixes show (no wall-clock accrual)
       fix.fixHoldSec = holdSince ? Math.max(0, (bus.when - holdSince) / 1000) : 0;
-      var ep = earliestPlausible(model, trips, fix, bus, targetIdx, nowSecOfDay,
-        nowSecOfDay - status.ageSec, prev);
+      // the last polled GPS course stands in for heading-less live pings
+      var course = Number.isFinite(bus.heading) ? { heading: bus.heading, when: bus.when }
+        : prev && prev.course && bus.when - prev.course.when <= CONFIG.courseKeepMs ? prev.course : null;
+      var ep = earliestPlausible(model, trips, fix,
+        course && !Number.isFinite(bus.heading) ? Object.assign({}, bus, { heading: course.heading }) : bus,
+        targetIdx, nowSecOfDay, nowSecOfDay - status.ageSec, prev);
       var p = ep.p;
       fix = ep.fix;
       if (prevFixes) {
         prevFixes[bus.id] = {
           routeDist: fix.routeDist, when: bus.when, lat: bus.lat, lng: bus.lng,
           unresolved: ep.contested,
+          course: course,
           recededFrom: recededMemory(model, fix, bus, targetIdx, prev),
           onRouteMovingAt: fix.offBy < CONFIG.atStopOffMeters && (bus.speed || 0) >= CONFIG.parkedSpeedMps
             ? bus.when : (prev ? prev.onRouteMovingAt : null),
@@ -1276,8 +1436,17 @@
           holdSince: holdSince, holdAt: holdAt,
           // the pre-start trip this bus was seen staged for, kept while that
           // trip is still the bus's match (so its early departure counts)
+          // (or while it is still at that trip's first stop: one moving fix at
+          // the pole read as the end of its last loop must not erase it — then
+          // past the first leg the run was clamped back to its published start,
+          // "7:42" at 500 Howard for a bus that left 4 min early, there 7:40)
           anchoredTripStartMin: p && p.anchoredTripStartMin != null ? p.anchoredTripStartMin
-            : (prev && p && p.matchedTripStartMin === prev.anchoredTripStartMin ? prev.anchoredTripStartMin : null)
+            : (prev && p && prev.anchoredTripStartMin != null &&
+              (p.matchedTripStartMin === prev.anchoredTripStartMin ||
+                (trips || []).some(function (t) {
+                  return t.startMin === prev.anchoredTripStartMin &&
+                    atAnchor(model, fix.routeDist, t.entries[0].routeDist, fix.holdSec);
+                })) ? prev.anchoredTripStartMin : null)
         };
       }
       if (!p) return;

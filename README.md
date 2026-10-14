@@ -78,7 +78,12 @@ Rules derived from recorded field GPS (July 1 and October 13, 2026):
   13 report: "11 min · 9:31" for a bus a minute away). A bus waiting at the
   first stop shows a range, its earliest possible arrival to the timetable
   time ("2–13 min · waiting at Berry & King"), because departures there were
-  seen up to 11 minutes ahead of the timetable.
+  seen up to 11 minutes ahead of the timetable. The earliest end drives at
+  Trakk's leg pace but never slower than the run's printed time: Berry & King
+  to 500 Howard is 25.8 min of Trakk legs and 18 printed, and 12 of 14
+  morning runs on October 14 took less than 25.8 (17.4–30.5), so the legs
+  alone put the early end after the bus (a bus stopped 45 s at Berry & King
+  read "7:25–7:27" at 500 Howard; it was there at 7:19).
 - **Waiting is not drifting** — while a bus sits still it keeps its trip
   match (its "lateness" on its own trip grows a second per second and would
   otherwise hand it to a later trip that hasn't started), GPS wobble while
@@ -99,6 +104,13 @@ Rules derived from recorded field GPS (July 1 and October 13, 2026):
   is the *latest* it comes. During service the hero shows a range from the
   earliest it could physically get to your stop (a bus leaving the lot
   before its 3:10 PM trip reached Berry at 3:16:47; the timetable said 3:21).
+  This holds with no trip match too: driving from the AM layover past Owens
+  St to Berry & King, every run reads the bus as the tail of its loop, and
+  Trakk's legs alone said 6:43 at 500 Howard for a bus there at 6:38. A bus
+  seen at the first stop stays "seen" while it is still there, so one moving
+  fix at the pole read as the end of its last loop doesn't clamp its early
+  run back to the published start once it passes the first leg ("7:42" for a
+  bus that left Berry & King 4 minutes early and came at 7:40).
 - **Comebacks are bus-centric** — a bus that passed your stop predicts its
   own next service: drive (at timetable pace) to the next trip's first
   stop, depart at max(published start, arrival there), and carry that
@@ -109,15 +121,21 @@ Rules derived from recorded field GPS (July 1 and October 13, 2026):
   stretch from 15 to ~25 minutes and buses wait out the difference parked
   near the yard. A bus stationary past a couple of light cycles stops
   being read as "driving, ever later" (which crept the ETA a second per
-  second); it pins to its next published departure, labeled "holding".
-  Only where buses lay over (past the last timed stop before a run's first
+  second): its next published departure is the *latest* it comes. Only
+  where buses lay over (past the last timed stop before a run's first
   stop): a bus stuck in traffic mid-loop still makes the run it is late
   for (stopped 2.5 minutes in traffic 2 km short of the terminal, a bus
-  read as "7:33 PM, holding" at Berry; it came at 7:12). A bus laying over
-  at the stop that ends its run (PM runs end at the terminal they start
-  from) is staged like one waiting at a first stop: a range up to its next
-  timetabled departure, not a pin to it (one parked 20 m short of Nektar
-  read "holding · 4:41" at Berry and was there at 4:28).
+  read as "7:33 PM, holding" at Berry; it came at 7:12). Laying over there
+  during service — where runs end (AM runs end at Owens St, 830 m short of
+  Berry & King; PM runs at the terminal they start from) — a bus is staged
+  like one waiting at a first stop: a range up to its next timetabled
+  departure, not a pin to it. The feed's timetable is stale (on October 14
+  the AM runs left Berry & King every 20 minutes, at :19, :39 and :59; the
+  feed lists 5:59, 6:19 and 6:39, then one every 15 minutes to 8:39, then
+  9:05, 9:29 and 9:54): one
+  parked 20 m short of Nektar read "holding · 4:41" at Berry and was there
+  at 4:28, one held at Owens St read "holding · 9:56" and was at Berry at
+  9:40.
 - **Wrong-street guard** — leaving Berry at Mission Creek buses drive 50–200 m
   off the drawn line, closer to the return leg than their own; a projection
   that would jump kilometers ahead in seconds keeps the bus on its own
