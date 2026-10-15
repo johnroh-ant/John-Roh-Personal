@@ -27,6 +27,27 @@ async function loadData() {
     JSON.parse(fs.readFileSync(path.join(__dirname, 'dep-6467db5ea59bbb100741d7b7.json')))];
 }
 
+// The committed route and timetable, for checks pinned to what the field
+// recordings were scored against (a live redraw would shift route distances).
+let fixtureCache = null;
+function fixture() {
+  if (!fixtureCache) {
+    const fs = require('fs'), path = require('path');
+    const model = T.buildLoopModel(JSON.parse(fs.readFileSync(path.join(__dirname, 'lts-fresh.json'), 'utf8')));
+    const dep = JSON.parse(fs.readFileSync(path.join(__dirname, 'dep-6467db5ea59bbb100741d7b7.json'), 'utf8'));
+    fixtureCache = { model, dep, trips: T.buildTrips(dep, model) };
+  }
+  return fixtureCache;
+}
+
+// The feed's own timetable, without the observed morning clock: for checks
+// of a mechanism under the stale timetable it was recorded against.
+function feedTrips(dep, model) {
+  const clock = T.CONFIG.observedClock;
+  T.CONFIG.observedClock = null;
+  try { return T.buildTrips(dep, model); } finally { T.CONFIG.observedClock = clock; }
+}
+
 async function main() {
   const [site, dep] = await loadData();
   const model = T.buildLoopModel(site);
@@ -197,25 +218,40 @@ async function main() {
     check('post-AM layover predicts 14:41 (PM), no phantom 11:00', p && Math.abs(p.arrivalSec - (14 * 3600 + 41 * 60)) < 90, p && clockOf(p.arrivalSec));
   }
   {
-    // [33] mid-AM layover at Berry&King. Within 5 min of a missed departure
-    // the bus reads as "departing late" (6:56+lateBy); past that it pins to
-    // the next departure's stop time (7:09 trip -> Berry@MC 7:11). Either
-    // way the prediction is bounded — no unbounded creep + 7-minute jump.
-    {
-      const d = at('2026-06-29T06:56:00-07:00');
-      const p = T.predictions(model, trips, [mkBus(berryKing.lat, berryKing.lng, 0, d.getTime())], 'work', {}, d)[0];
-      console.log('  layover-creep 06:56:', p && clockOf(p.arrivalSec) + ' method ' + p.method);
-      check('layover at 06:56 reads as late 6:54 departure (<=7:00)', p && p.arrivalSec >= 6 * 3600 + 56 * 60 && p.arrivalSec <= 7 * 3600, p && clockOf(p.arrivalSec));
-    }
-    {
-      const d = at('2026-06-29T07:02:00-07:00');
-      const p = T.predictions(model, trips, [mkBus(berryKing.lat, berryKing.lng, 0, d.getTime())], 'work', {}, d)[0];
-      console.log('  layover-creep 07:02:', p && clockOf(p.arrivalSec) + ' method ' + p.method);
-      // in service, a staged bus reads as a range: timetable time as the
-      // latest, the earliest it could physically get there if it left now
-      check('layover at 07:02 pinned to 7:11 (timetable bound of its range)',
-        p && Math.abs((p.latestSec || p.arrivalSec) - (7 * 3600 + 11 * 60)) < 60 && p.arrivalSec <= 7 * 3600 + 11 * 60 + 30,
-        p && clockOf(p.arrivalSec) + '-' + (p.latestSec ? clockOf(p.latestSec) : '-'));
+    // [33] mid-AM layover at Berry&King, on the observed morning clock
+    // (:59/:19/:39). Laid over there (5+ min) before its slot the bus leaves
+    // on it (6:59 -> Berry@MC 7:01); within 5 min after a slot it reads as
+    // "departing late" (now + the drive); laid over past that it waits for
+    // the next slot (7:19 -> 7:21). Either way the prediction is bounded — no
+    // unbounded creep + jump. A bus stopped there only as long as boarding
+    // could be running the previous slot late: a range from now.
+    const layover = (hhmm, heldMin) => {
+      const end = at('2026-06-29T' + hhmm + ':00-07:00').getTime(), fixes = {};
+      let p = null;
+      for (let w = end - heldMin * 60000; w <= end; w += 30000) {
+        p = T.predictions(model, trips, [mkBus(berryKing.lat, berryKing.lng, 0, w)], 'work', fixes, new Date(w))[0];
+      }
+      console.log('  layover-creep ' + hhmm + ' (held ' + heldMin + ' min):', p && clockOf(p.arrivalSec) + (p.latestSec ? '-' + clockOf(p.latestSec) : '') + ' method ' + p.method);
+      return p;
+    };
+    let p = layover('06:56', 6);
+    check('laid over at 06:56 it leaves on the 6:59 slot: 7:01, no range from now', p && Math.abs(p.arrivalSec - (7 * 3600 + 60)) < 30 && !p.latestSec,
+      p && clockOf(p.arrivalSec));
+    p = layover('06:56', 0);
+    check('...just stopped at 06:56: a range from now to 7:01', p && p.latestSec && Math.abs(p.latestSec - (7 * 3600 + 60)) < 30 &&
+      p.arrivalSec < 6 * 3600 + 59 * 60, p && clockOf(p.arrivalSec) + '-' + (p.latestSec ? clockOf(p.latestSec) : '-'));
+    p = layover('07:02', 5);
+    check('layover at 07:02 reads as late on 6:59, leaving now (<=7:05)', p && p.arrivalSec <= 7 * 3600 + 5 * 60 && !p.latestSec, p && clockOf(p.arrivalSec));
+    p = layover('07:05', 6);
+    check('laid over at 07:05 it waits for the 7:19 slot: 7:21', p && Math.abs(p.arrivalSec - (7 * 3600 + 21 * 60)) < 30 && !p.latestSec,
+      p && clockOf(p.arrivalSec));
+    // a bus running late that stops at 07:05 to board (2026-07-20: one 8 min
+    // behind ran the 8:39 at 8:47) is not pinned to the next slot, even
+    // boarding for 3 minutes (since 7:02:30)
+    for (const heldMin of [0, 2.5]) {
+      p = layover('07:05', heldMin);
+      check('...stopped at 07:05 for ' + heldMin + ' min: a range from now (~7:07) to 7:21, never a 7:21 pin', p && p.arrivalSec <= 7 * 3600 + 8 * 60 &&
+        p.latestSec && Math.abs(p.latestSec - (7 * 3600 + 21 * 60)) < 30, p && clockOf(p.arrivalSec) + '-' + (p.latestSec ? clockOf(p.latestSec) : '-'));
     }
   }
   {
@@ -591,10 +627,10 @@ async function main() {
   }
 
   console.log('\n=== FIELD BUG 2026-08-06: layover hold creeping the comeback ETA ===');
-  // Post-8:41 headways stretch from 15 to ~25 min; buses wait out the
-  // difference parked near the SW corner. The engine read "parked" as
-  // "driving, ever later on the old slot" and crept the ETA a second per
-  // second (9:49 shown for a bus that would serve the 9:56 slot).
+  // Buses wait out the slack before their next run parked past Owens St. The
+  // engine read "parked" as "driving, ever later on the old slot" and crept
+  // the ETA a second per second (9:49 shown for a bus that would serve the
+  // feed's 9:56 slot).
   {
     const mkParked = (rd, whenMs) => {
       const pt = pointAt(rd);
@@ -614,10 +650,12 @@ async function main() {
     console.log('  layover-hold: t=30s ' + clockOf(early.arr) + '/' + early.method +
       '  t=' + late.t + 's ' + clockOf(late.arr) + '..' + clockOf(late.latest) + '/' + late.method + (late.holding ? ' HOLDING' : ''));
     // Laid over where runs end (AM: past Owens St) it is staged like a bus at
-    // Berry & King: the next future run (9:56) is the LATEST it comes, not a
-    // pin -- 2026-10-14 one held at Owens was pinned to 9:56 and came at 9:40.
-    check('confirmed hold: the next future run (9:56) is the latest it comes',
-      held.length && held.every(a => Math.abs(a.latest - (9 * 3600 + 56 * 60)) < 90 && a.arr <= a.latest),
+    // Berry & King, for the next slot of the morning clock: the 9:39 run left
+    // while it sat, so the 9:59 (Berry at Mission Creek 10:01) — the latest
+    // it comes, and once it has sat longer than boarding (5 min), the time
+    check('confirmed hold: it waits for the next slot (9:59 run, 10:01 at Berry)',
+      held.length && held.every(a => Math.abs(a.latest - (10 * 3600 + 60)) < 90 && a.method === 'schedule' &&
+        (a.t < 330 || Math.abs(a.arr - (10 * 3600 + 60)) < 90)),
       held.map(a => a.t + 's:' + clockOf(a.arr) + '..' + clockOf(a.latest)).join(' '));
     const spread = Math.max(...held.map(a => a.latest)) - Math.min(...held.map(a => a.latest));
     check('no per-second creep of the timetable end once holding', spread < 60, spread + 's spread');
@@ -651,8 +689,9 @@ async function main() {
     }
     console.log('  hold-carry:', p && clockOf(p.arrivalSec) + (p.latestSec ? '..' + clockOf(p.latestSec) : '') +
       '/' + p.method + (p.holding ? ' HOLDING' : ''));
+    // (an unconfirmed hold reads as the late comeback, ~9:46/next-trip)
     check('render ticks between pings do not reset the hold',
-      p && p.latestSec && Math.abs(p.latestSec - (9 * 3600 + 56 * 60)) < 90, p && clockOf(p.latestSec || p.arrivalSec));
+      p && p.method === 'schedule' && Math.abs((p.latestSec || p.arrivalSec) - (10 * 3600 + 60)) < 90, p && clockOf(p.arrivalSec) + '/' + p.method);
   }
 
   {
@@ -783,13 +822,21 @@ async function main() {
       const p = T.predictions(model, trips, [mkBus(mix.lat, mix.lng, 6, d1.getTime())], 'home', fixes, d1)[0];
       check('departing bus off the drawn line is not teleported onto the return leg', p && p.method !== 'next-trip', p && p.method + '@' + Math.round(p.fix.routeDist));
     }
-    // (h) staged at the anchor during service: a range, earliest physical to timetable
+    // (h) holding at the anchor during service: the morning clock is not
+    // stale (no run left before its slot), so it reads its slot — the 9:19
+    // run, there 9:21 — not a range from "now" to the feed's 9:31 (the
+    // October 13 report: "11 min · 9:31" for a bus that came 9:21). The
+    // afternoon's stale timetable still gives a range (checks above).
     {
-      const q = pointAt(bk.routeDist + 5);
-      const d = at('2026-06-29T09:15:00-07:00');
-      const p = T.predictions(model, trips, [mkBus(q.lat, q.lng, 0.1, d.getTime())], 'work', {}, d)[0];
-      console.log('  staged-range:', p && clockOf(p.arrivalSec) + '-' + (p.latestSec ? clockOf(p.latestSec) : '-') + ' at ' + p.waitingAt);
-      check('staged bus reads earliest-physical .. timetable 9:31', p && p.latestSec && Math.abs(p.latestSec - (9 * 3600 + 31 * 60)) < 60 && p.etaSec <= 180, p && clockOf(p.arrivalSec));
+      const q = pointAt(bk.routeDist + 5), fixes = {};
+      let p = null;
+      for (let k = 0; k <= 12; k++) {
+        const d = at('2026-06-29T09:09:00-07:00'); d.setTime(d.getTime() + k * 30000);
+        p = T.predictions(model, trips, [mkBus(q.lat, q.lng, 0.1, d.getTime())], 'work', fixes, d)[0];
+      }
+      console.log('  staged-clock:', p && clockOf(p.arrivalSec) + '-' + (p.latestSec ? clockOf(p.latestSec) : '-') + ' at ' + p.waitingAt);
+      check('staged bus laid over on the morning clock reads its 9:19 slot (9:21), no range', p && Math.abs(p.arrivalSec - (9 * 3600 + 21 * 60)) < 30 &&
+        !p.latestSec && p.onClock && p.departsFrom === 'Berry St & King St' && p.departsSec === 9 * 3600 + 19 * 60, p && clockOf(p.arrivalSec));
     }
     // (i) parked off-route (staging lot) is listed, never the headline; a bus that
     // just drove the route and queues off the drawing is still in service
@@ -832,8 +879,14 @@ async function main() {
       [mkBus(lat, lng, v, at(whenIso).getTime())], mode, fixes || {}, at(nowIso || whenIso))[0];
     // the 4th at Library pole (return leg) is 25 m from the outbound line just
     // past Berry: a bus dwelling there is not "at" Berry at Mission Creek
-    const pl = pred(lib.lat, lib.lng, 0, '2026-06-29T09:39:55-07:00', '2026-06-29T09:40:00-07:00', 'work');
+    const pl = pred(lib.lat, lib.lng, 0, '2026-06-29T09:49:55-07:00', '2026-06-29T09:50:00-07:00', 'work');
     check('bus dwelling at 4th at Library is not at Berry at Mission Creek', pl && pl.method !== 'at-stop' && pl.etaSec > 600, pl && pl.method + ' ' + pl.etaMin + 'min');
+    // ...but at 9:40 a run of the morning clock is due just past Berry (the 9:39,
+    // there 9:41), and schedule fit reads the fix there: with the nearer
+    // passage as near, it is "can't tell which way", never a plain "Here"
+    const pf = pred(lib.lat, lib.lng, 0, '2026-06-29T09:39:55-07:00', '2026-06-29T09:40:00-07:00', 'work');
+    check('...at 9:40, read at Berry by schedule fit: flagged "can\'t tell which way"',
+      pf && (pf.method !== 'at-stop' || pf.ambiguous), pf && pf.method + (pf.ambiguous ? '/ambiguous' : ''));
     // stopped where the passages cross: the benefit of the doubt holds on every
     // render tick and new stopped fix (it must not harden into "Here")
     {
@@ -845,7 +898,8 @@ async function main() {
       check('stopped at the passage crossing: "near, can\'t tell which way" on every tick', seen.every(x => x === 'at-stop/ambiguous'), seen.join(' '));
     }
     // outside service a bus parked at the stop is not "Here — head out now"
-    for (const [hh, mode, st] of [['12:00:00', 'home', how], ['21:30:00', 'home', how], ['12:00:00', 'work', bmc]]) {
+    // (11:40: past the morning clock's last run, 10:19, by more than a late run)
+    for (const [hh, mode, st] of [['12:00:00', 'home', how], ['21:30:00', 'home', how], ['12:00:00', 'work', bmc], ['11:40:00', 'work', bmc]]) {
       const q = pointAt(st.routeDist + 15);
       const p = pred(q.lat, q.lng, 0, '2026-06-29T' + hh + '-07:00', null, mode);
       check('bus parked at ' + st.name + ' at ' + hh + ' (no service) is not "at your stop"', !p || p.method !== 'at-stop', p && p.method);
@@ -912,8 +966,7 @@ async function main() {
     // pinned to the committed route and timetable the recording was scored
     // against (a live redraw would shift route distances)
     const fs = require('fs'), path = require('path');
-    const model = T.buildLoopModel(JSON.parse(fs.readFileSync(path.join(__dirname, 'lts-fresh.json'), 'utf8')));
-    const trips = T.buildTrips(JSON.parse(fs.readFileSync(path.join(__dirname, 'dep-6467db5ea59bbb100741d7b7.json'), 'utf8')), model);
+    const { model, trips } = fixture();
     const L = model.path.length;
     const how = model.stops.find(s => s.name.includes('500 Howard St'));
     const lo = at('2026-10-13T18:40:00-07:00').getTime(), hi = at('2026-10-13T18:59:00-07:00').getTime();
@@ -948,12 +1001,11 @@ async function main() {
   {
     // Replays of the recording (committed route and timetable): each window
     // ends before the bus reached the stop, and no reading may be later than
-    // when it got there. The timetable is stale (the AM runs left Berry & King
-    // every 20 min, at :19/:39/:59; the feed lists one every 15 min to 8:39,
-    // then 9:05, 9:29, 9:54), so a bus between runs has only a range.
+    // when it got there. The feed's AM timetable is stale (one run every 15
+    // min to 8:39, then 9:05, 9:29, 9:54); the app runs the morning on the
+    // observed clock (Berry & King every 20 min, at :19/:39/:59).
     const fs = require('fs'), path = require('path');
-    const model = T.buildLoopModel(JSON.parse(fs.readFileSync(path.join(__dirname, 'lts-fresh.json'), 'utf8')));
-    const trips = T.buildTrips(JSON.parse(fs.readFileSync(path.join(__dirname, 'dep-6467db5ea59bbb100741d7b7.json'), 'utf8')), model);
+    const { model, trips } = fixture();
     const all = fs.readFileSync(path.join(__dirname, 'field-2026-10-14-am.jsonl'), 'utf8').trim().split('\n')
       .map(l => JSON.parse(l)).filter(r => r.route === T.CONFIG.routeId && T.validCoord(r.lat, r.lng));
     const replay = (bus, mode, from, to) => {
@@ -966,11 +1018,14 @@ async function main() {
       return out;
     };
     const sod = hms => { const [h, m, x] = hms.split(':').map(Number); return h * 3600 + m * 60 + x; };
-    const late = (out, came) => out.filter(p => p.arrivalSec > sod(came));
+    const late = (out, came, slack) => out.filter(p => p.arrivalSec > sod(came) + (slack || 0));
     [
-      // laid over at Owens St 9:25-9:34 (where AM runs end) after the 9:29 slot
-      // passed: "holding · 9:56" at Berry at Mission Creek; it came 9:40:53
-      ['1738', 'work', '09:25:00', '09:34:05', '09:40:53', 'held at Owens St, its run\'s slot passed'],
+      // laid over at Owens St 9:25-9:34 (where AM runs end) after the feed's
+      // 9:29 slot passed: "holding · 9:56" at Berry at Mission Creek; it came
+      // 9:40:53. On the clock it reads the 9:39 run's printed 9:41:00, 7 s
+      // late: the fastest recorded run reached Berry at Mission Creek 1.8 min
+      // after its slot, 12 s ahead of the printed 2 (well before it left)
+      ['1738', 'work', '09:25:00', '09:34:05', '09:40:53', 'held at Owens St, its run\'s slot passed', 15],
       // driving from the Owens layover to Berry & King before the 6:19 run, no
       // trip to match yet: Trakk legs alone said 6:43 at 500 Howard; there 6:38:52
       ['76084', 'home', '06:14:00', '06:17:15', '06:38:52', 'out of the layover before its run'],
@@ -981,9 +1036,9 @@ async function main() {
       // read as its last loop dropped "seen at the anchor", and past Berry at
       // Mission Creek the run was clamped back to 7:42; there 7:40:33
       ['76084', 'home', '07:16:30', '07:24:05', '07:40:33', 'a run that left early stays early']
-    ].forEach(([bus, mode, from, to, came, what]) => {
-      const out = replay(bus, mode, from, to), bad = late(out, came);
-      check(what + ': never after ' + came + ' (bus ' + bus + ', ' + mode + ')', out.length > 5 && !bad.length,
+    ].forEach(([bus, mode, from, to, came, what, slack]) => {
+      const out = replay(bus, mode, from, to), bad = late(out, came, slack);
+      check(what + ': never after ' + came + (slack ? ' (+' + slack + ' s)' : '') + ' (bus ' + bus + ', ' + mode + ')', out.length > 5 && !bad.length,
         bad.length + ' of ' + out.length + ' later' + (bad.length ? ', worst ' + clockOf(Math.max(...bad.map(p => p.arrivalSec))) : ''));
     });
     const gone = replay('76084', 'home', '07:19:40', '07:24:05').filter(p => p.beforeRun || p.latestSec);
@@ -1022,18 +1077,114 @@ async function main() {
     // read "already passed · next loop 8:54". Its GPS course (56°, 9 m/s)
     // runs along the outbound passage instead.
     const fs = require('fs'), path = require('path');
-    const fxModel = T.buildLoopModel(JSON.parse(fs.readFileSync(path.join(__dirname, 'lts-fresh.json'), 'utf8')));
-    const fxTrips = T.buildTrips(JSON.parse(fs.readFileSync(path.join(__dirname, 'dep-6467db5ea59bbb100741d7b7.json'), 'utf8')), fxModel);
+    const { model: fxModel, dep: fxDep } = fixture();
     const r = fs.readFileSync(path.join(__dirname, 'field-2026-10-14-am.jsonl'), 'utf8').trim().split('\n').map(l => JSON.parse(l))
       .find(x => x.name === '20024' && Math.floor(x.when / 1000) === at('2026-10-14T08:11:15-07:00').getTime() / 1000);
-    const open = heading => r && T.predictions(fxModel, fxTrips, [Object.assign(mkBus(r.lat, r.lng, r.speed, r.when), { heading })],
-      'home', {}, new Date(r.when + 2000))[0];
-    const withCourse = open(r && r.heading), without = open(null);
-    console.log('  fresh open 8:11:15:', without && without.method, '->', withCourse && withCourse.method + ' ' + clockOf(withCourse.arrivalSec));
-    check('fresh open: a bus on its way is not "already passed" when its course runs along its passage',
-      withCourse && withCourse.method !== 'next-trip' && withCourse.arrivalSec <= 8 * 3600 + 22 * 60 + 18, withCourse && withCourse.method);
-    check('...(without the course this fix reads passed: the check exercises the heading rule)', without && without.method === 'next-trip',
-      without && without.method);
+    // on the feed's stale timetable (as recorded) schedule fit picks the
+    // return leg; the morning clock fits the outbound passage on its own
+    for (const [label, fxTrips] of [['feed timetable', feedTrips(fxDep, fxModel)], ['morning clock', T.buildTrips(fxDep, fxModel)]]) {
+      const open = heading => r && T.predictions(fxModel, fxTrips, [Object.assign(mkBus(r.lat, r.lng, r.speed, r.when), { heading })],
+        'home', {}, new Date(r.when + 2000))[0];
+      const withCourse = open(r && r.heading), without = open(null);
+      console.log('  fresh open 8:11:15 (' + label + '):', without && without.method, '->', withCourse && withCourse.method + ' ' + clockOf(withCourse.arrivalSec));
+      check('fresh open (' + label + '): a bus on its way is not "already passed" when its course runs along its passage',
+        withCourse && withCourse.method !== 'next-trip' && withCourse.arrivalSec <= 8 * 3600 + 22 * 60 + 18, withCourse && withCourse.method);
+      if (label === 'feed timetable') {
+        check('...(without the course this fix reads passed: the check exercises the heading rule)', without && without.method === 'next-trip',
+          without && without.method);
+      }
+    }
+  }
+
+  console.log('\n=== MORNING CLOCK (observed 2026-10-14) ===');
+  {
+    const { model: fxModel, dep: fxDep } = fixture();
+    const hm = m => Math.floor(m / 60) + ':' + String(m % 60).padStart(2, '0');
+    const amStarts = ts => ts.filter(t => t.startMin < 12 * 60).map(t => hm(t.startMin)).join(' ');
+    const clockTrips = T.buildTrips(fxDep, fxModel);
+    const grid = Array.from({ length: 14 }, (_, k) => hm(359 + 20 * k)).join(' ');
+    check('AM runs leave Berry & King on the 20-minute clock, 5:59 to 10:19', amStarts(clockTrips) === grid, amStarts(clockTrips));
+    check('...marked observed, the afternoon runs not',
+      clockTrips.every(t => t.observed === (t.startMin < 12 * 60)));
+    const am = clockTrips.find(t => t.startMin === 7 * 60 + 19);
+    const feedAm = feedTrips(fxDep, fxModel).filter(t => t.startMin < 12 * 60);
+    check('...keeping the feed\'s stop-to-stop times', am && feedAm.length === 14 && feedAm.every(fd => am.entries.length === fd.entries.length &&
+      am.entries.every((e, i) => e.idx === fd.entries[i].idx && e.min - am.startMin === fd.entries[i].min - fd.startMin)));
+    check('...in the stop schedule too (Berry at Mission Creek 6:01, 6:21, 6:41)',
+      T.stopScheduleMinutes(fxDep, 'work').slice(0, 3).join() === [361, 381, 401].join(), T.stopScheduleMinutes(fxDep, 'work').slice(0, 3).map(hm).join(' '));
+    // any other morning list is a real timetable change: used as is
+    const moved = JSON.parse(JSON.stringify(fxDep));
+    const run654 = moved.find(l => l.stops && l.stops[0] && l.stops[0].displayTime === '6:54');
+    run654.stops[0].displayTime = '6:55';
+    const movedTrips = T.buildTrips(moved, fxModel);
+    check('a changed feed timetable is used as is (no clock runs)', movedTrips.every(t => !t.observed) &&
+      movedTrips.some(t => t.startMin === 6 * 60 + 55), amStarts(movedTrips));
+    const dropped = fxDep.filter(l => !(l.stops && l.stops[0] && l.stops[0].displayTime === '9:05'));
+    check('...and so is one missing a run', T.buildTrips(dropped, fxModel).every(t => !t.observed));
+    const retimed = JSON.parse(JSON.stringify(fxDep));
+    retimed.find(l => l.stops && l.stops[0] && l.stops[0].displayTime === '8:24').stops[1].displayTime = '8:27';
+    check('...or one whose stop-to-stop times changed', T.buildTrips(retimed, fxModel).every(t => !t.observed));
+  }
+
+  console.log('\n=== SLOW TRAFFIC: a range, never a later point time ===');
+  {
+    const bmc = stopAt('Berry at Mission Creek'), fre = stopAt('181 Fremont Street 181'), how = stopAt('500 Howard St');
+    // drive from rd `from` toward 500 Howard at `pace` x each leg's scheduled
+    // speed, one fix every 10 s, starting at `iso`; optionally holding at
+    // rd `holdAt` for `holdSec` first, and with a GPS fix `spike` m behind
+    // every 30th fix
+    const drive = (iso, from, pace, opts) => {
+      const o = opts || {}, fixes = {};
+      let t = at(iso).getTime(), rd = from, p = null, held = !o.holdSec, k = 0;
+      const fix = (v, back) => {
+        const q = pointAt(rd - (back || 0));
+        p = T.predictions(model, trips, [mkBus(q.lat, q.lng, v, t)], 'home', fixes, new Date(t + 1000))[0];
+        t += 10000;
+      };
+      while (rd < how.routeDist - 600) {
+        if (!held && rd >= o.holdAt) {
+          rd = o.holdAt;
+          for (let h = 0; h * 10 < o.holdSec; h++) fix(0);
+          held = true;
+        }
+        const st = model.stops[T.legAt(model, rd)], v = st.legDist / st.legDur * pace;
+        fix(v, o.spike && ++k % 30 === 0 ? o.spike : 0);
+        rd += v * 10;
+      }
+      return p;
+    };
+    const pm = '2026-06-29T16:15:00-07:00', bmcOut = bmc.routeDist + 100;
+    const free = drive(pm, bmcOut, 1), crawl = drive(pm, bmcOut, 0.4), hold = drive(pm, bmcOut, 1, { holdAt: fre.routeDist + 5, holdSec: 600 });
+    const spiky = drive(pm, bmcOut, 0.4, { spike: 250 });
+    // an 11-min layover 222 m past Owens St (no stop pole), then on through
+    // Berry & King without stopping, at scheduled pace
+    const owensLay = drive('2026-06-29T09:41:00-07:00', 1700, 1, { holdAt: 1700, holdSec: 660 });
+    const show = p => p && p.method + ' ' + clockOf(p.arrivalSec) + (p.latestSec ? '..' + clockOf(p.latestSec) : '') + ' slow ' + p.slowBySec + 's';
+    console.log('  free:', show(free), '| crawl:', show(crawl), '| 10-min hold at Fremont:', show(hold));
+    console.log('  crawl with spikes:', show(spiky), '| layover past Owens:', show(owensLay));
+    check('a bus at its scheduled pace gets a single time', free && !free.latestSec && !free.slowBySec, show(free));
+    check('a bus crawling at 0.4x pace gets a range up to its lost time again', crawl && crawl.slowBySec >= T.CONFIG.slowRunSec &&
+      crawl.latestSec > crawl.arrivalSec + 90 && crawl.latestSec <= crawl.arrivalSec + crawl.slowBySec + 1, show(crawl));
+    check('a 10-min hold at a stop pole is not traffic', hold && !hold.slowBySec, show(hold));
+    check('...nor an 11-min layover past Owens St (then through Berry & King)', owensLay && !owensLay.slowBySec, show(owensLay));
+    check('a 250 m GPS spike every 5 min doesn\'t count the same ground twice', spiky && crawl &&
+      Math.abs(spiky.slowBySec - crawl.slowBySec) < 120, show(spiky) + ' vs ' + crawl.slowBySec + 's');
+    // 2026-10-13 PM: 20024 queued from 73-99 Mission St to 500 Howard (there
+    // 18:43:15), reading "2 min" for 13 minutes; the range's late end covers it
+    const fs = require('fs'), path = require('path');
+    const { model: fxModel, trips: fxTrips } = fixture();
+    const fixes = {}, out = [];
+    const lo = at('2026-10-13T18:28:00-07:00').getTime(), hi = at('2026-10-13T18:41:00-07:00').getTime();
+    fs.readFileSync(path.join(__dirname, 'field-2026-10-13-pm.jsonl'), 'utf8').trim().split('\n').map(l => JSON.parse(l))
+      .filter(r => r.name === '20024' && r.route === T.CONFIG.routeId && T.validCoord(r.lat, r.lng) && r.when <= hi)
+      .forEach(r => {
+        const p = T.predictions(fxModel, fxTrips, [mkBus(r.lat, r.lng, r.speed || 0, r.when)], 'home', fixes, new Date(r.when))[0];
+        if (r.when >= lo && p) out.push(p);
+      });
+    const came = 18 * 3600 + 43 * 60 + 15;
+    const short = out.filter(p => !(p.latestSec >= came - 180 && p.slowBySec > 0) || p.arrivalSec > came);
+    check('queued toward 500 Howard: every reading a range reaching its 18:43:15 arrival (bus 20024)', out.length > 20 && !short.length,
+      short.length + ' of ' + out.length + ' short' + (short.length ? ', e.g. ' + show(short[0]) : ''));
   }
 
   console.log('\n' + (failures ? failures + ' FAILURES' : 'ALL CHECKS PASSED'));

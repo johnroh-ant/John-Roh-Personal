@@ -523,11 +523,18 @@
           ? 'Can\'t tell yet which way it is headed — this is the sooner reading; check the map.'
           : top.latestSec && top.beforeRun
           ? 'Its run hasn\'t started — the timetable says ~' + fmtClockSec(top.latestSec) + ', but runs often start early.'
+          : top.latestSec && top.slowBySec
+          ? 'Slow traffic — it is ~' + Math.round(top.slowBySec / 60) + ' min behind its usual pace this run, so it could take until ~' + fmtClockSec(top.latestSec) + '.'
           : top.latestSec
           ? 'Timetable: at your stop ~' + fmtClockSec(top.latestSec) + ' — it could leave sooner.'
           : top.waitingAt && top.holding ? 'No timetabled departure — the time assumes it leaves now.'
           : top.stale ? 'Last seen ' + ageMin + ' min ago, ' + miles(top.meters) + ' mi away between ' +
             shortName(top.legFrom) + ' and ' + shortName(top.legTo) + '.'
+          : top.onClock && top.departsFrom && top.departsSec > top.tripStartMin * 60 + 60
+          ? 'Its ' + T.fmtClock(top.tripStartMin) + ' run is late leaving ' + shortName(top.departsFrom) + ' — it could go any moment.'
+          : top.onClock && top.departsFrom
+          ? 'Leaves ' + shortName(top.departsFrom) + ' ~' + fmtClockSec(top.departsSec) + ' — morning runs keep a ' +
+            T.CONFIG.observedClock.everyMin + '-minute clock.'
           : top.etaSec < ARRIVING_NOW_SEC ? 'Pulling up at your stop — watch the map.'
           : miles(top.meters) + ' mi away · between ' + shortName(top.legFrom) + ' and ' + shortName(top.legTo);
       }
@@ -535,7 +542,8 @@
       var badges = '';
       // adherence can't be vouched for from a stale fix, nor for a bus that
       // is waiting to leave (its timetable slot is the question, not a fact)
-      if (top.delaySec !== null && top.method === 'schedule' && !top.stale && !top.latestSec && !top.waitingAt) {
+      if (top.delaySec !== null && top.method === 'schedule' && !top.stale && !top.latestSec && !top.waitingAt &&
+          top.departsSec === null) {
         var d = Math.round(top.delaySec / 60), a = Math.abs(d);
         // beyond DELAY_BADGE_MAX_MIN the early/late attribution is ambiguous
         // between two adjacent trips (the arrival time is the same either way)
@@ -548,6 +556,7 @@
           : '<span class="badge">next run</span>';
       }
       if (top.estimated || (top.method === 'legs' && !top.stale)) badges += '<span class="badge">position-based estimate</span>';
+      if (top.latestSec && top.slowBySec) badges += '<span class="badge late">slow traffic</span>';
       if (top.ambiguous && top.method !== 'at-stop') badges += '<span class="badge warn">direction unclear</span>';
       if (top.stale) badges += '<span class="badge warn">GPS ' + ageMin + ' min old</span>';
       if (top.offRoute) badges += '<span class="badge warn">off usual route — approximate</span>';

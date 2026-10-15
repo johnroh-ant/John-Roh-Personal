@@ -100,6 +100,12 @@
     ],
     minLegSpeedMps: 2.0,     // Trakk leg durations are capped at this pace (one leg
                              // lists 769 s for 147 m — a routing artifact)
+    slowRunSec: 180,         // a bus this far behind its scheduled pace on its current run
+                             // gets a range, not a single time: downtown congestion (3rd St,
+                             // the Mission -> Howard bridge queue) made Berry at Mission Creek
+                             // -> 500 Howard take 46-72 min on 2026-10-13 PM vs 18 printed
+    slowLegFactorMax: 6,     // ...whose late end adds at most this many times the scheduled
+                             // time left
     serviceTailSec: 45 * 60, // buses run this long past the last published trip end
                              // (late buses / trips missing from the feed's timetable)
     teleportMeters: 2500,    // a continuity break implying a jump this far ahead...
@@ -133,6 +139,18 @@
                                 // "early on the next trip", and without
                                 // hysteresis projection noise flips the match
                                 // (and the early/late badge) every render
+    },
+    // The feed's morning timetable is stale: it lists runs from Berry & King
+    // at these times, but on 2026-10-14 all 14 morning runs (and 10-13's
+    // 10:19) left on a 20-minute clock, 0.3-3.5 min after :59/:19/:39 and
+    // never before. While the feed still lists exactly these times, its
+    // morning runs are replaced by that clock (keeping its stop-to-stop
+    // times); any other list is a real timetable change and is used as is.
+    observedClock: {
+      firstStop: 'Berry St & King St',
+      replaces: ['5:59', '6:19', '6:39', '6:54', '7:09', '7:24', '7:39', '7:54',
+        '8:09', '8:24', '8:39', '9:05', '9:29', '9:54'],
+      first: '5:59', last: '10:19', everyMin: 20
     },
     // plausible service area; rejects garbage fixes like Trakk's -404 sentinel
     bounds: { latMin: 37.5, latMax: 38.1, lngMin: -122.8, lngMax: -122.0 },
@@ -392,6 +410,7 @@
     if (model.stops.length < 2) return null;
     model.stops[model.stops.length - 1].isTerminalDup =
       model.stops[model.stops.length - 1].name === model.stops[0].name;
+    model.loopLegSec = model.stops.reduce(function (sum, st) { return sum + st.legDur; }, 0);
     return model;
   }
 
@@ -827,13 +846,20 @@
     return staged ? { trip: staged, lateBy: Math.max(0, nowSecOfDay - staged.startMin * 60) } : null;
   }
 
+  // How long past a trip's published times buses can still be running it:
+  // the feed's timetable misses trips (on 2026-10-13 buses served both stops
+  // 21-40 minutes after the last AM visits it lists), the observed morning
+  // clock lists every run (the whole morning was recorded), so past its runs
+  // only a late run (the trip-match limit).
+  function tailSec(trip) {
+    return trip.observed ? CONFIG.tripMatch.maxDelaySec : CONFIG.serviceTailSec;
+  }
+
   // A trip has started and service hasn't wound down: from a trip's start
-  // until well past its end (late buses, and trips missing from the feed's
-  // timetable — on 2026-10-13 buses served both stops 21-40 minutes after
-  // the last AM visits the feed lists).
+  // until its tail past its end.
   function inService(trips, sec) {
     return (trips || []).some(function (t) {
-      return sec >= t.startMin * 60 && sec <= t.endMin * 60 + CONFIG.serviceTailSec;
+      return sec >= t.startMin * 60 && sec <= t.endMin * 60 + tailSec(t);
     });
   }
 
@@ -843,8 +869,20 @@
   function plausibleArrival(model, trips, targetIdx, arrSec) {
     return (trips || []).some(function (t) {
       var e = firstEntryFor(model, t, targetIdx);
-      return e && Math.abs(e.min * 60 - arrSec) <= CONFIG.serviceTailSec;
+      return e && Math.abs(e.min * 60 - arrSec) <= tailSec(t);
     });
+  }
+
+  // A bus laying over for a run of the observed morning clock leaves on its
+  // slot: no run left before its slot, and one sitting longer than any
+  // boarding stop (0.6-3.7 min at Berry & King on 2026-10-14) isn't running
+  // the previous slot late — on 2026-07-20 a bus 8 minutes behind ran the
+  // 8:39 at 8:47 (at Berry at Mission Creek 8:49). So does one parked in a
+  // staging lot (where buses lay over; GPS jitter there keeps restarting the
+  // hold count) and one seen laying over for that run, now driving to its
+  // first stop (fix.heldForMin). Anything else could still leave sooner.
+  function leavesOnSlot(trip, fix, inLot) {
+    return !!trip.observed && (inLot || fix.holdSec >= CONFIG.stagedGraceSec || fix.heldForMin === trip.startMin);
   }
 
   // First timetable entry of a trip serving the target stop (entries are
@@ -931,15 +969,18 @@
     // ahead of it: the bus could leave now. Once service is running, the
     // countdown is the earliest it can physically be at the stop and the
     // timetable time is the latest. Before the period's first departure there
-    // is nothing to leave early for.
-    var earliest = inService(trips, busSec)
+    // is nothing to leave early for, nor for a bus holding for a run of the
+    // observed morning clock.
+    var onSlot = leavesOnSlot(staged.trip, fix, staged.inLot);
+    var earliest = inService(trips, busSec) && !onSlot
       ? Math.min(timetabled, busSec + earliestEtaSeconds(model, staged.trip, fix.routeDist, targetIdx)) : timetabled;
     return {
       arrivalSec: earliest, latestSec: timetabled > earliest + 90 ? timetabled : null,
       delaySec: staged.lateBy, method: 'schedule',
       tripStartMin: staged.trip.startMin, matchedTripStartMin: staged.trip.startMin,
       anchoredTripStartMin: staged.trip.startMin,
-      waitingAt: anchor ? anchor.name : null, departsSec: staged.trip.startMin * 60 + staged.lateBy
+      waitingAt: anchor ? anchor.name : null, departsSec: staged.trip.startMin * 60 + staged.lateBy,
+      departsFrom: anchor ? anchor.name : null, onClock: onSlot
     };
   }
 
@@ -1058,6 +1099,7 @@
     if (!recentlyInService &&
         (inLot || (fix.holdSec >= CONFIG.holdSec && fix.offBy > CONFIG.yardOffMeters))) {
       var lot = stagedDeparture(model, trips, fix, bus, busSec);
+      if (lot) lot.inLot = inLot;
       var lotResult = lot && stagedResult(model, trips, lot, targetIdx, fix, busSec);
       return lotResult || { arrivalSec: null, delaySec: null, method: 'parked', tripStartMin: null };
     }
@@ -1162,8 +1204,9 @@
         };
         // Before its trip starts the timetable is only the latest it comes,
         // as for a staged bus: the feed's timetable is stale (departures seen
-        // 9-11 min ahead of it), and once service runs it can go any time.
-        var earliest = preStart && inService(trips, busSec) &&
+        // 9-11 min ahead of it), and once service runs it can go any time
+        // (unless holding for a run of the observed morning clock).
+        var earliest = preStart && inService(trips, busSec) && !leavesOnSlot(trip, fix) &&
           busSec + earliestEtaSeconds(model, trip, fix.routeDist, targetIdx);
         if (earliest && earliest < arrivalSec - 90) {
           r.arrivalSec = earliest;
@@ -1267,6 +1310,78 @@
     };
   }
 
+  // Scheduled (leg-duration) seconds from the loop terminal to route distance d.
+  function legClockSec(model, d) {
+    return model.loopLegSec - etaSeconds(model, d, model.stops.length - 1);
+  }
+
+  /*
+   * Run pace (mode-independent): how much scheduled progress the bus has
+   * made since its current run began, to compare with the fix time elapsed.
+   * The timetable and leg durations describe uncongested running — on
+   * 2026-10-13 PM the downtown legs ran 2-8x slower — and a bus that has been
+   * falling behind that pace is the evidence that an ETA computed at that
+   * pace is only the earliest it can come. A run begins at the first fix the
+   * app sees (or after a GPS silence it moved through), at the loop
+   * terminal, and where the bus stops at the first stop of a run due then (a
+   * 2-minute dwell at Berry & King after a layover at Owens St is the morning
+   * run starting) or lays over before it, in a staging lot, or off any stop
+   * for longer than any queue (a midday park). Past its first couple of
+   * minutes a hold at a stop pole doesn't count (holding for its slot, or a
+   * driver break: 22 min at 181 Fremont on 2026-10-13); those first minutes
+   * do, like any stop — the 3rd St queue backs up through the 341 3rd St pole
+   * (stops of 2.5-3.5 min there on 2026-10-13 PM). Holds are judged on the
+   * interval since the previous fix, so a parked bus's GPS silence counts.
+   * Returns {from: fix ms, ff: scheduled sec since, clock: legClockSec, rd}.
+   */
+  function runPace(model, trips, fix, bus, prev, busSec) {
+    if (prev && prev.run && bus.when && bus.when === prev.when) return prev.run; // same fix re-evaluated
+    var c = legClockSec(model, fix.routeDist);
+    var restart = { from: bus.when, ff: 0, clock: c, rd: fix.routeDist };
+    if (!prev || !prev.run || !bus.when || !prev.when) return restart;
+    var gapMs = bus.when - prev.when;
+    // silent too long to account for, unless it is still where it was (a
+    // parked device goes quiet: the silence is the hold, or the queue)
+    if (gapMs > CONFIG.deadMs && groundMeters(prev, bus) >= CONFIG.resumeMeters) return restart;
+    var half = model.loopLegSec / 2;
+    if (c < prev.run.clock - half) return restart;              // crossed the loop terminal
+    var stoppedNow = (bus.speed || 0) < CONFIG.parkedSpeedMps;
+    var at = stoppedNow ? bus : prev;
+    var atRd = stoppedNow ? fix.routeDist : prev.routeDist;
+    // held through this interval: parked now past a light cycle, or parked at
+    // the previous fix and silent (or still) for as long
+    var held = (stoppedNow && fix.holdSec >= CONFIG.holdSec) ||
+      (prev.holdSince != null && gapMs >= CONFIG.holdSec * 1000);
+    var heldMs = stoppedNow ? fix.holdSec * 1000 : gapMs;
+    var due = (trips || []).filter(function (t) {
+      return t.entries[0] && Math.abs(t.startMin * 60 - busSec) <= CONFIG.tripMatch.windowBeforeSec;
+    });
+    var stopFix = { routeDist: atRd, holdSec: held ? CONFIG.holdSec : 0 };
+    // stopped at the first stop of a run due now, or laid over before it...
+    if ((stoppedNow || prev.holdSince != null) && due.some(function (t) {
+      return held ? inLayoverZone(model, t, stopFix) : atAnchor(model, atRd, t.entries[0].routeDist, 0);
+    })) return restart;
+    // ...or in a staging lot, or off any stop for longer than any queue (a
+    // midday park; at a stop pole a hold is excused below, and the lateness
+    // before it still counts: 76084 was late into its 22-min break at 181
+    // Fremont on 2026-10-13 and later still after it)
+    var atPole = held && poleNear(model, at);
+    if (held && ((!atPole && heldMs >= CONFIG.tripMatch.maxDelaySec * 1000) ||
+        CONFIG.stagingLots.some(function (lot) { return groundMeters(at, lot) < lot.radius; }))) return restart;
+    var from = prev.run.from + (atPole ? gapMs : 0);
+    // GPS wobble or a spike backward along the route: no progress, and the
+    // run keeps its position (or the way forward again would count twice)
+    var back = mod(prev.run.rd - fix.routeDist, model.path.length);
+    if (back > 0 && back < CONFIG.spikeMeters) return { from: from, ff: prev.run.ff, clock: prev.run.clock, rd: prev.run.rd };
+    var step = mod(c - prev.run.clock, model.loopLegSec);
+    if (step > half) step = 0;                                  // re-read onto another passage
+    return { from: from, ff: prev.run.ff + step, clock: c, rd: fix.routeDist };
+  }
+
+  function poleNear(model, pt) {
+    return model.stops.some(function (st) { return groundMeters(pt, st) < CONFIG.stopApproachMeters; });
+  }
+
   // A STOPPED bus with no continuity behind its fix (every fresh app open,
   // or a re-resolution) can sit where passages run side by side — dwelling
   // past Berry at Mission Creek next to the return leg, or at the Fremont &
@@ -1332,8 +1447,14 @@
       return c.routeDist !== fix.routeDist && d <= d0 + CONFIG.passageNoiseMeters && d <= CONFIG.offRouteMeters;
     });
     best.contested = others.length > 0;
-    // already at the stop: no other passage reads sooner
-    if (best.p && best.p.method === 'at-stop') return best;
+    // already at the stop: no other passage reads sooner — but read there by
+    // schedule fit over a nearer passage it is the benefit of the doubt, not
+    // "Here" (at 9:40 on the morning clock, a bus dwelling at 4th at Library,
+    // 25 m from the line just past Berry at Mission Creek)
+    if (best.p && best.p.method === 'at-stop') {
+      if (others.some(function (c) { return Math.sqrt(c.d2) < fix.offBy; })) best.p.ambiguous = true;
+      return best;
+    }
     tryPassages(others);
     // the reading rests on the benefit of the doubt, not on the evidence
     if (best.fix !== fix && best.p) best.p.ambiguous = true;
@@ -1370,7 +1491,8 @@
       var status = busStatus(bus, now.getTime());
       if (status.dead) return;
       var prev = prevFixes && prevFixes[bus.id];
-      var fix = locateBus(model, bus, prev, trips, mod(nowSecOfDay - status.ageSec, 86400));
+      var fixSec = mod(nowSecOfDay - status.ageSec, 86400); // the fix's second of the day
+      var fix = locateBus(model, bus, prev, trips, fixSec);
       if (!fix || fix.offBy > CONFIG.garageMeters) return; // garage/no-fix positions predict nothing
       // Stationary-episode tracking: how long has this bus been parked?
       // Displacement is measured from where the episode STARTED, not
@@ -1407,14 +1529,21 @@
         ? Math.max(0, ((parkedNow ? now.getTime() : bus.when) - holdSince) / 1000) : 0;
       // ...and the part of it the bus's own fixes show (no wall-clock accrual)
       fix.fixHoldSec = holdSince ? Math.max(0, (bus.when - holdSince) / 1000) : 0;
+      // the morning-clock run it was seen laying over for, until that run's
+      // slot has passed by the staged grace (see leavesOnSlot)
+      fix.heldForMin = prev && prev.heldForMin != null &&
+        fixSec <= prev.heldForMin * 60 + CONFIG.stagedGraceSec ? prev.heldForMin : null;
       // the last polled GPS course stands in for heading-less live pings
       var course = Number.isFinite(bus.heading) ? { heading: bus.heading, when: bus.when }
         : prev && prev.course && bus.when - prev.course.when <= CONFIG.courseKeepMs ? prev.course : null;
       var ep = earliestPlausible(model, trips, fix,
         course && !Number.isFinite(bus.heading) ? Object.assign({}, bus, { heading: course.heading }) : bus,
-        targetIdx, nowSecOfDay, nowSecOfDay - status.ageSec, prev);
+        targetIdx, nowSecOfDay, fixSec, prev);
       var p = ep.p;
       fix = ep.fix;
+      var run = model.loopLegSec > 0 ? runPace(model, trips, fix, bus, prev, fixSec) : null;
+      // time lost against the scheduled pace on this run (fix time, not wall clock)
+      var runLostSec = run ? Math.max(0, (bus.when - run.from) / 1000 - run.ff) : 0;
       if (prevFixes) {
         prevFixes[bus.id] = {
           routeDist: fix.routeDist, when: bus.when, lat: bus.lat, lng: bus.lng,
@@ -1434,6 +1563,8 @@
           tauSec: p && typeof p.matchedTauSec === 'number' ? p.matchedTauSec
             : (prev ? prev.tauSec : null),
           holdSince: holdSince, holdAt: holdAt,
+          run: run,
+          heldForMin: p && p.onClock ? p.tripStartMin : fix.heldForMin,
           // the pre-start trip this bus was seen staged for, kept while that
           // trip is still the bus's match (so its early departure counts)
           // (or while it is still at that trip's first stop: one moving fix at
@@ -1475,6 +1606,22 @@
           latestSec = p.arrivalSec - p.delaySec;
         }
       }
+      // An en-route time computed at scheduled pace is only the EARLIEST while
+      // the bus is visibly running slower than that pace: it has lost
+      // runLostSec on this run and may lose as much again before the stop
+      // (2026-10-13 PM: buses that lost 10-20 min on 3rd St lost 6-34 more in
+      // the Mission -> Howard queue). The point time stays the earliest — a
+      // later guess would make riders miss buses when a jam clears.
+      var slowBySec = 0;
+      // (not for a bus whose time is set by a departure it waits for)
+      if (runLostSec >= CONFIG.slowRunSec && (p.method === 'schedule' || p.method === 'legs') &&
+          !p.waitingAt && !p.beforeRun && typeof p.departsSec !== 'number') {
+        slowBySec = Math.round(runLostSec);
+        // ...but not more than the legs left can plausibly absorb (the worst
+        // recorded: Mission St -> 500 Howard, 5 scheduled min, took 39)
+        var slowCapSec = CONFIG.slowLegFactorMax * etaSeconds(model, fix.routeDist, targetIdx);
+        latestSec = Math.max(latestSec || 0, arrivalSec + Math.min(runLostSec, slowCapSec));
+      }
       var etaSec = arrivalSec - nowSecOfDay;
       out.push({
         bus: bus,
@@ -1492,8 +1639,11 @@
         ambiguous: !!p.ambiguous,
         waitingAt: p.waitingAt || null,
         beforeRun: !!p.beforeRun,
+        slowBySec: slowBySec,
         latestSec: latestSec !== null && latestSec > arrivalSec + 90 ? latestSec : null,
         departsSec: typeof p.departsSec === 'number' ? p.departsSec : null,
+        departsFrom: p.departsFrom || null,
+        onClock: !!p.onClock,
         estimated: !!p.estimated,
         recentlyPassed: !!p.recentlyPassed,
         tripStartMin: p.tripStartMin,
@@ -1531,10 +1681,46 @@
     return (name || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
   }
 
+  /*
+   * The day's loops from the departure data, with the stale morning runs
+   * replaced by the observed clock (CONFIG.observedClock) while the feed
+   * still lists exactly the stale runs. Clock runs copy the feed's first
+   * morning run shifted to each slot, and are marked `observed`.
+   */
+  function timetableLoops(depData) {
+    var loops = Array.isArray(depData) ? depData : [];
+    var c = CONFIG.observedClock;
+    if (!c) return loops;
+    var startOf = function (loop) {
+      var s0 = loop && loop.stops && loop.stops[0];
+      return s0 && nameKey(s0.name) === nameKey(c.firstStop) ? parseDisplayTime(s0.displayTime) : null;
+    };
+    var runs = loops.filter(function (loop) { return startOf(loop) !== null; });
+    var starts = runs.map(startOf).sort(function (a, b) { return a - b; });
+    if (starts.join() !== c.replaces.map(parseDisplayTime).join()) return loops;
+    // ...each with the same stops and stop-to-stop times
+    var shape = function (loop) {
+      return loop.stops.map(function (s) {
+        var m = parseDisplayTime(s.displayTime);
+        return nameKey(s.name) + '@' + (m === null ? '' : m - startOf(loop));
+      }).join('|');
+    };
+    if (runs.some(function (loop) { return shape(loop) !== shape(runs[0]); })) return loops;
+    var template = runs.filter(function (loop) { return startOf(loop) === starts[0]; })[0];
+    var clock = [];
+    for (var t = parseDisplayTime(c.first); t <= parseDisplayTime(c.last); t += c.everyMin) {
+      clock.push({ observed: true, stops: template.stops.map(function (s) {
+        var m = parseDisplayTime(s.displayTime);
+        return m === null ? s : Object.assign({}, s, { displayTime: fmtClock(m - starts[0] + t) });
+      }) });
+    }
+    return clock.concat(loops.filter(function (loop) { return runs.indexOf(loop) < 0; }));
+  }
+
   // All scheduled minutes-of-day at the mode's stop, across the day's loops.
   function stopScheduleMinutes(depData, mode) {
     var mins = [];
-    (Array.isArray(depData) ? depData : []).forEach(function (loop) {
+    timetableLoops(depData).forEach(function (loop) {
       ((loop && loop.stops) || []).forEach(function (s) {
         if (!isModeStop(mode, s.name, s.id)) return;
         var v = parseDisplayTime(s.displayTime);
@@ -1557,7 +1743,8 @@
 
   /*
    * Build timetable trips from the departure data. Each trip is one loop:
-   *   { startMin, endMin, entries: [{name, idx, routeDist, min}] }
+   *   { startMin, endMin, entries: [{name, idx, routeDist, min}], observed }
+   * (observed: a run of the observed morning clock, see timetableLoops)
    * Entries follow the trip's own stop order; idx is the model stop index
    * (terminal duplicates resolved by forward progression around the loop).
    */
@@ -1569,7 +1756,7 @@
       (byName[key] = byName[key] || []).push(s.idx);
     });
     var trips = [];
-    (Array.isArray(depData) ? depData : []).forEach(function (loop) {
+    timetableLoops(depData).forEach(function (loop) {
       var entries = [];
       var prevIdx = null;
       ((loop && loop.stops) || []).forEach(function (s) {
@@ -1594,7 +1781,8 @@
         entries.push({ name: nm, idx: idx, routeDist: rd >= L ? rd - L : rd, min: min });
       });
       if (entries.length >= 2) {
-        trips.push({ startMin: entries[0].min, endMin: entries[entries.length - 1].min, entries: entries });
+        trips.push({ startMin: entries[0].min, endMin: entries[entries.length - 1].min, entries: entries,
+          observed: !!loop.observed });
       }
     });
     trips.sort(function (a, b) { return a.startMin - b.startMin; });

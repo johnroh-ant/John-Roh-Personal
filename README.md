@@ -58,7 +58,7 @@ every 15 s (from 45 s) whenever a bus is within 12 minutes or its pings have
 gone silent, and the Pusher socket uses tight activity timeouts so a dead
 connection is detected within seconds.
 
-Rules derived from recorded field GPS (July 1 and October 13, 2026):
+Rules derived from recorded field GPS (July 1 and October 13–14, 2026):
 
 - **No departure without evidence** — a bus within 120 m past your stop (or
   stopped up to 250 m past it, or just before it) is *at your stop*,
@@ -129,13 +129,41 @@ Rules derived from recorded field GPS (July 1 and October 13, 2026):
   during service — where runs end (AM runs end at Owens St, 830 m short of
   Berry & King; PM runs at the terminal they start from) — a bus is staged
   like one waiting at a first stop: a range up to its next timetabled
-  departure, not a pin to it. The feed's timetable is stale (on October 14
-  the AM runs left Berry & King every 20 minutes, at :19, :39 and :59; the
-  feed lists 5:59, 6:19 and 6:39, then one every 15 minutes to 8:39, then
-  9:05, 9:29 and 9:54): one
+  departure, not a pin to it. The feed's timetable is stale: one
   parked 20 m short of Nektar read "holding · 4:41" at Berry and was there
   at 4:28, one held at Owens St read "holding · 9:56" and was at Berry at
   9:40.
+- **Morning runs keep a 20-minute clock** — on October 14 every AM run left
+  Berry & King 0.3–3.5 minutes after :59, :19 or :39 (5:59 through 10:19;
+  October 13's 10:19 run too), never before its slot, whatever the bus
+  behind was doing: buses wait out the slack at Owens St (5–17 minutes) and
+  at Berry & King (1–4), not for the next bus to close up. The feed lists
+  5:59, 6:19 and 6:39, then one every 15 minutes to 8:39, then 9:05, 9:29
+  and 9:54. While it still lists exactly those times (all with the same
+  stop-to-stop times), the app uses the 20-minute clock instead, and a bus
+  holding for a morning run shows that run's time, not a range from "now";
+  any other timetable is taken as a real change and used as is. A bus that
+  only stops briefly at Berry & King still gets a range: it may be running
+  the previous slot late (on July 20 a bus 8 minutes behind ran the 8:39 at
+  8:47). With
+  the feed's times, a bus at Berry & King waiting for its 9:19 slot read
+  "11 min · 9:31" (the October 13 report).
+- **Slow traffic is a range, not a promise** — the timetable and Trakk's leg
+  durations describe uncongested running. On October 13 PM, Berry at Mission
+  Creek → 500 Howard took 46–72 minutes from 4 PM on (18 printed, 21–26
+  measured in free flow), mostly in mid-block queues on 3rd St and on the
+  Mission → Howard approach (up to 39 minutes for the last 700 m). An
+  en-route time stays the earliest the bus can come — a later guess makes
+  riders miss buses when a jam clears — but once a bus has lost 3+ minutes
+  against its scheduled pace on the current run, the late end of a range
+  allows it to lose as much again (adding at most 6× the scheduled time
+  left). A run starts where the bus stops at the first stop of a run due
+  then or lays over in the staging lot, and a hold at a stop pole counts
+  only for its first couple of minutes, like any stop (the 3rd St queue
+  backs up through the 341 3rd St pole; a driver's 22-minute break at 181
+  Fremont is not traffic). The pace builds from what the app has seen, so
+  right after opening it a bus gets a single time for the first few
+  minutes.
 - **Wrong-street guard** — leaving Berry at Mission Creek buses drive 50–200 m
   off the drawn line, closer to the return leg than their own; a projection
   that would jump kilometers ahead in seconds keeps the bus on its own
@@ -192,7 +220,10 @@ visible.
 
 - **The feed's timetable looks out of date.** Trakk's departure data (last
   updated November 2024 for the PM run) still lists the October 2024 times,
-  while the TMA has since published newer timetables. On October 13, 2026 buses
+  while the TMA has since published newer timetables. Its morning runs are
+  replaced by the recorded 20-minute clock (above); if the shuttle changes
+  its morning schedule without Trakk being updated, `CONFIG.observedClock`
+  in `tracker.js` needs the new clock. On October 13, 2026 buses
   served Berry at Mission Creek at 10:02 and 10:24 and 500 Howard at 10:33 and
   ~10:52 — up to 40 minutes after the last AM visits the feed lists — and
   terminal departures ran 9–11 minutes ahead of it. The app therefore trusts

@@ -62,6 +62,10 @@
  *   ETA ERROR       predicted arrival - actual arrival for evaluations in the
  *                   --window minutes before an actual arrival (+ = engine says later).
  *                   While AT the stop the engine should read ~0 min.
+ *   RANGES          a prediction shown as a range (latestSec) whose late end reaches
+ *                   within 3 min of the actual arrival is not "confidently early":
+ *                   early-uncovered counts the >3 min early readings shown as a
+ *                   single time (or a range that still ends > 3 min too soon).
  *   INSTABILITY     arrival jumps > 3 min between consecutive evaluations of the
  *                   same bus, excluding the legitimate rollover when the bus
  *                   actually leaves the stop.
@@ -457,6 +461,7 @@ function evaluate(busName, track, visitsByMode, holds, mode, times, reopenSec) {
       engRd: p ? Math.round(p.fix.routeDist) : null, engMeters: p ? Math.round(p.meters) : null,
       engHoldSec: p ? Math.round(p.fix.holdSec || 0) : null,
       engLeg: p ? p.legFrom + ' -> ' + p.legTo : null,
+      latestSec: p && typeof p.latestSec === 'number' ? p.latestSec : null,
       truth: ph
     };
     // grading
@@ -483,6 +488,8 @@ function evaluate(busName, track, visitsByMode, holds, mode, times, reopenSec) {
     const approaching = ph.phase !== 'at-stop' && ph.phase !== 'pulling-away' && ph.phase !== 'yard/off-route';
     if (approaching && ph.visit && ph.secToArrival <= WINDOW_SEC && p) {
       r.etaErrSec = p.arrivalSec - r.actualArrivalSod;
+      // a range whose late end reaches the actual arrival (within 3 min) is honest
+      if (r.latestSec !== null) r.rangeCovers = r.latestSec >= r.actualArrivalSod - 180;
       // the rider is late if the engine says after the bus actually left
       // the rider is told a time after the bus actually left (would miss it)
       if (!ph.visit.extrapolated) r.afterDeparture = p.arrivalSec > sodOf(ph.visit.departure || ph.visit.lastNear);
@@ -544,6 +551,9 @@ function summarize(evals) {
     etaOver3min: err.filter(r => Math.abs(r.etaErrSec) > 180).length,
     etaOver3minLate: err.filter(r => r.etaErrSec > 180).length,
     etaOver3minEarly: err.filter(r => r.etaErrSec < -180).length,
+    etaOver3minEarlyUncovered: err.filter(r => r.etaErrSec < -180 && !r.rangeCovers).length,
+    rangeShown: err.filter(r => r.latestSec !== null).length,
+    rangeEndOver10minLate: err.filter(r => r.latestSec !== null && r.latestSec > r.actualArrivalSod + 600).length,
     saidAfterBusLeft: err.filter(r => r.afterDeparture).length,
     atStopEvals: all.filter(r => r.atStopEtaSec !== undefined).length,
     atStopEtaOver2min: all.filter(r => r.atStopEtaSec !== undefined && r.atStopEtaSec > 120).length,
@@ -557,7 +567,7 @@ function rowLine(r) {
   return `${r.clock} age${String(r.fixAgeSec).padStart(4)}s v${String(r.speed).padStart(4)} | ${r.method.padEnd(14)} arr ${r.arrivalSec !== null ? clockSod(r.arrivalSec) : '--:--:--'} eta ${r.etaSec !== null ? String(Math.round(r.etaSec / 60)).padStart(2) + 'm' : ' - '}` +
     ` trip ${(r.trip || '-').padEnd(8)} dly ${fmtMin(r.delaySec).padStart(6)}${r.holding ? ' HOLDING' : ''}${r.stale ? ' STALE' : ''} engRd ${r.engRd} engHold ${r.engHoldSec}s` +
     ` || truth ${tr.phase}${tr.metersToStop !== undefined ? ' ' + tr.metersToStop + 'm-to-go' : ''}${tr.secToArrival !== undefined ? ' arrIn ' + fmtMin(tr.secToArrival) : ''}${tr.inHold ? ' HOLD+' + tr.holdElapsedSec + 's' : ''} rd ${tr.truthRd}` +
-    `${r.etaErrSec !== undefined ? ' ERR ' + fmtMin(r.etaErrSec) : ''}${r.etaErrSecExtrap !== undefined ? ' ERR~' + fmtMin(r.etaErrSecExtrap) : ''}${r.falseDeparted ? ' **FALSE-DEPARTED ' + r.falseDeparted + '**' : ''}${r.fdUnproven ? ' (fd-unproven: ' + r.fdUnproven + ')' : ''}${tr.reversedDecode ? ' REVERSED-DECODE' : ''}${r.jumpKind ? ' [' + r.jumpKind + ' ' + fmtMin(r.jumpSec) + ']' : ''}`;
+    `${r.latestSec !== null && r.latestSec !== undefined ? ' ..' + clockSod(r.latestSec) : ''}${r.etaErrSec !== undefined ? ' ERR ' + fmtMin(r.etaErrSec) : ''}${r.etaErrSecExtrap !== undefined ? ' ERR~' + fmtMin(r.etaErrSecExtrap) : ''}${r.falseDeparted ? ' **FALSE-DEPARTED ' + r.falseDeparted + '**' : ''}${r.fdUnproven ? ' (fd-unproven: ' + r.fdUnproven + ')' : ''}${tr.reversedDecode ? ' REVERSED-DECODE' : ''}${r.jumpKind ? ' [' + r.jumpKind + ' ' + fmtMin(r.jumpSec) + ']' : ''}`;
 }
 
 
@@ -568,7 +578,7 @@ function flagOf(r) {
   if (r.dropped) return 'DROPPED';
   if (r.phantom) return 'PHANTOM (yard bus given a live ETA)';
   if (r.etaErrSec !== undefined && r.etaErrSec > 180) return 'ETA>3min LATE';
-  if (r.etaErrSec !== undefined && r.etaErrSec < -180) return 'ETA>3min EARLY';
+  if (r.etaErrSec !== undefined && r.etaErrSec < -180) return r.rangeCovers ? 'ETA>3min EARLY (range covers it)' : 'ETA>3min EARLY';
   if (r.etaErrSecExtrap !== undefined && Math.abs(r.etaErrSecExtrap) > 180) return 'ETA~>3min (extrapolated arrival)';
   if (r.labelOnly) return 'next-loop-while-staging';
   if (r.fdUnproven) return 'next-trip vs unproven approach (not FALSE-DEPARTED)';
@@ -647,7 +657,7 @@ function main() {
         B.evals[kind][mode] = ev;
         totals[kind].push(ev);
         const s = summarize([ev]);
-        console.log(`  -- [${kind}-replay ${mode}: ${ev.stop}] ${s.evaluations} evals | FALSE-DEPARTED hard ${s.falseDepartedHard} soft ${s.falseDepartedSoft} (yard ${s.nextTripAtYard}, unproven ${s.falseDepartedUnproven}) | ETA scored ${s.etaScored}: |err| med ${fmtMin(s.etaAbsMedianSec)} p90 ${fmtMin(s.etaAbsP90Sec)} max ${fmtMin(s.etaAbsMaxSec)} bias ${fmtMin(s.etaMeanSignedSec)} >3min ${s.etaOver3min} (late ${s.etaOver3minLate}/early ${s.etaOver3minEarly}) after-bus-left ${s.saidAfterBusLeft} | at-stop evals ${s.atStopEvals}, eta>2min ${s.atStopEtaOver2min} | jumps ${s.jumps} rollovers ${s.rollovers} | dropped ${s.droppedWhileApproaching}`);
+        console.log(`  -- [${kind}-replay ${mode}: ${ev.stop}] ${s.evaluations} evals | FALSE-DEPARTED hard ${s.falseDepartedHard} soft ${s.falseDepartedSoft} (yard ${s.nextTripAtYard}, unproven ${s.falseDepartedUnproven}) | ETA scored ${s.etaScored}: |err| med ${fmtMin(s.etaAbsMedianSec)} p90 ${fmtMin(s.etaAbsP90Sec)} max ${fmtMin(s.etaAbsMaxSec)} bias ${fmtMin(s.etaMeanSignedSec)} >3min ${s.etaOver3min} (late ${s.etaOver3minLate}/early ${s.etaOver3minEarly}, early-uncovered ${s.etaOver3minEarlyUncovered}; ranges ${s.rangeShown}, ending >10min late ${s.rangeEndOver10minLate}) after-bus-left ${s.saidAfterBusLeft} | at-stop evals ${s.atStopEvals}, eta>2min ${s.atStopEtaOver2min} | jumps ${s.jumps} rollovers ${s.rollovers} | dropped ${s.droppedWhileApproaching}`);
         ev.perVisit.forEach(pv => console.log(`     visit ${pv.arrival}${pv.extrapolated ? ' (extrapolated)' : ''}: ${pv.windowEvals} evals in ${WINDOW_SEC / 60}-min window, |err| med ${fmtMin(pv.absErrMedianSec)} p90 ${fmtMin(pv.absErrP90Sec)}, worst late ${fmtMin(pv.maxLateSec)} / early ${fmtMin(pv.maxEarlySec)}, rider-would-miss ${pv.riderWouldMiss} | at stop: ${pv.atStopMethods || '-'} | pulling away: ${pv.pullingAwayMethods || '-'} | first next-trip ${pv.firstNextTrip || '-'}`));
         if (LOG) { ev.rows.forEach(r => console.log('     ' + rowLine(r))); continue; }
         printEpisodes(ev.rows);

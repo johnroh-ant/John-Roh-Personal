@@ -48,8 +48,15 @@ node .claude/skills/verify/replay.js         # older stability replay (July trac
   live pings in between don't. The normal replays keep
   history from the first fix, so they never covered fresh opens: with the
   app left open FALSE-DEPARTED hard is 0 everywhere, but fresh opens every
-  60 s still give 91 home-mode (500 Howard) false departures across the four
-  recordings (165 before heading was used; 0 at Berry at Mission Creek).
+  60 s still give 62 home-mode (500 Howard) false departures across the four
+  recordings (81 before the morning clock, 165 before heading was used; 0 at
+  Berry at Mission Creek).
+  Ranges: a reading shown as a range whose late end reaches within 3 min of
+  the actual arrival isn't "confidently early". `early-uncovered` counts the
+  >3 min early readings that are not (a single time, or a range ending too
+  soon); `ranges` and `ending >10min late` (late end more than 10 min after
+  the bus came) show what that costs. Slow-traffic ranges build from the
+  app's own history, so fresh opens don't get them.
   FALSE-DEPARTED hard excludes "unproven" rows (shown as `unproven N`): a
   next-trip reading where the decoded truth runs backward within ±2 min of
   the fix (after 500 Howard buses head to 4th St off the drawn return leg,
@@ -70,7 +77,8 @@ node .claude/skills/verify/replay.js         # older stability replay (July trac
   20024, 76084; its `-departures.jsonl` has the same times as the fixture)
   and `field-2026-10-14-am.jsonl` (5:57-11:05 AM, the whole morning service;
   1738, 20024, 76084 — AM runs leave Berry & King every 20 min at :59/:19/:39,
-  not the feed's 15). Fixtures: `lts-fresh.json`, `dep-*.json` (image URLs
+  not the feed's 15; the engine runs the morning on that clock,
+  `CONFIG.observedClock`, while the feed lists the stale times). Fixtures: `lts-fresh.json`, `dep-*.json` (image URLs
   scrubbed, so the two stop-image checks only run live).
 
 ## Page checks (offline simulator)
